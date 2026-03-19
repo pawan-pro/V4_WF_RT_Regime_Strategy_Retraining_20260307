@@ -100,18 +100,18 @@ market_df = market_spark.toPandas()
 market_df["timestamp"] = pd.to_datetime(market_df["timestamp"])
 market_df = market_df.sort_values("timestamp")
 
-# Calculate forward returns (1-week = 168 hours)
-market_df["SPY_ret_1w"] = market_df["SPY_close"].shift(-168) / market_df["SPY_close"] - 1
-market_df["QQQ_ret_1w"] = market_df["QQQ_close"].shift(-168) / market_df["QQQ_close"] - 1
+# Calculate forward returns (1-hour ahead to match hourly bars)
+market_df["SPY_ret_1h"] = market_df["SPY_close"].shift(-1) / market_df["SPY_close"] - 1
+market_df["QQQ_ret_1h"] = market_df["QQQ_close"].shift(-1) / market_df["QQQ_close"] - 1
 
 # Merge returns with features
 silver_df = silver_df.merge(
-    market_df[["timestamp", "SPY_ret_1w", "QQQ_ret_1w"]],
+    market_df[["timestamp", "SPY_ret_1h", "QQQ_ret_1h"]],
     on="timestamp",
     how="left"
 )
 
-print("✅ Returns calculated (1-week forward)")
+print("✅ Returns calculated (1-hour forward)")
 
 # COMMAND ----------
 
@@ -299,8 +299,8 @@ for i in range(len(retrain_dates)-1):
         eq_alloc_base, pos_base, _, _ = get_allocation_baseline(regime_pred)
         
         # Get actual returns
-        spy_ret = row.get("SPY_ret_1w", 0) if not pd.isna(row.get("SPY_ret_1w")) else 0
-        qqq_ret = row.get("QQQ_ret_1w", 0) if not pd.isna(row.get("QQQ_ret_1w")) else 0
+        spy_ret = row.get("SPY_ret_1h", 0) if not pd.isna(row.get("SPY_ret_1h")) else 0
+        qqq_ret = row.get("QQQ_ret_1h", 0) if not pd.isna(row.get("QQQ_ret_1h")) else 0
         
         # Calculate strategy returns
         # Conviction-based
@@ -401,13 +401,25 @@ plt.show()
 
 # COMMAND ----------
 
+def _estimate_periods_per_year(index):
+    """Estimate periods/year from timestamp index (assumes regular spacing)."""
+    if len(index) < 2:
+        return 252
+    diffs = index.to_series().diff().dropna()
+    median_seconds = diffs.dt.total_seconds().median()
+    if not median_seconds or median_seconds <= 0:
+        return 252
+    seconds_per_year = 365.25 * 24 * 3600
+    return seconds_per_year / median_seconds
+
 def calc_metrics(equity_curve, name):
     """Calculate performance metrics"""
     returns = equity_curve.pct_change().dropna()
+    periods_per_year = _estimate_periods_per_year(equity_curve.index)
     
     total_ret = (equity_curve.iloc[-1] / equity_curve.iloc[0]) - 1
-    ann_ret = (1 + total_ret) ** (12 / len(equity_curve)) - 1  # Monthly approximation
-    vol = returns.std() * np.sqrt(12)  # Annualized
+    ann_ret = (1 + total_ret) ** (periods_per_year / len(returns)) - 1
+    vol = returns.std() * np.sqrt(periods_per_year)
     sharpe = ann_ret / vol if vol > 0 else 0
     
     # Max drawdown
@@ -457,7 +469,9 @@ print(metrics_df.round(4).to_string())
 
 # Analyze performance by conviction tier
 conv_tier_returns = results_conv_df.groupby("conviction_tier")["strategy_return"].agg(["mean", "std", "count"])
-conv_tier_returns["sharpe"] = conv_tier_returns["mean"] / conv_tier_returns["std"] * np.sqrt(12)
+    conv_tier_returns["sharpe"] = conv_tier_returns["mean"] / conv_tier_returns["std"] * np.sqrt(
+        _estimate_periods_per_year(results_conv_df.index)
+    )
 
 print("Performance by Conviction Tier:")
 print(conv_tier_returns.round(4))
@@ -486,7 +500,9 @@ plt.show()
 
 # Performance by regime
 regime_returns = results_conv_df.groupby("regime")["strategy_return"].agg(["mean", "std", "count"])
-regime_returns["sharpe"] = regime_returns["mean"] / regime_returns["std"] * np.sqrt(12)
+regime_returns["sharpe"] = regime_returns["mean"] / regime_returns["std"] * np.sqrt(
+    _estimate_periods_per_year(results_conv_df.index)
+)
 regime_returns = regime_returns.rename(index={0: "Expansion", 1: "Slowdown", 2: "Contraction"})
 
 print("Performance by Regime:")
