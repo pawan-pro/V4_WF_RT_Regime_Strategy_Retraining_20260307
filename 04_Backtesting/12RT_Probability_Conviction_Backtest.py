@@ -58,11 +58,11 @@ print(f"   Conviction thresholds: HIGH≥{CONVICTION_HIGH}, MED≥{CONVICTION_ME
 
 # COMMAND ----------
 
-# Load silver features
+# Load silver features (include SPY_close for returns)
 spark_df = (
     spark.table(SILVER_TABLE)
     .filter(f"timestamp >= '{TRAIN_START}'")
-    .select(["timestamp"] + FEATURES)
+    .select(["timestamp", "SPY_close"] + FEATURES)
 )
 silver_df = spark_df.toPandas()
 silver_df["timestamp"] = pd.to_datetime(silver_df["timestamp"])
@@ -90,28 +90,21 @@ print(f"   Class distribution:\n{silver_df.regime.value_counts()}")
 
 # COMMAND ----------
 
-# Load market data for returns calculation
-market_spark = (
-    spark.table(SILVER_TABLE)
-    .filter(f"timestamp >= '{TRAIN_START}'")
-    .select("timestamp", "SPY_close", "QQQ_close")
-)
-market_df = market_spark.toPandas()
-market_df["timestamp"] = pd.to_datetime(market_df["timestamp"])
-market_df = market_df.sort_values("timestamp")
-
 # Calculate forward returns (1-hour ahead to match hourly bars)
-market_df["SPY_ret_1h"] = market_df["SPY_close"].shift(-1) / market_df["SPY_close"] - 1
-market_df["QQQ_ret_1h"] = market_df["QQQ_close"].shift(-1) / market_df["QQQ_close"] - 1
+silver_df["SPY_ret_1h"] = silver_df["SPY_close"].shift(-1) / silver_df["SPY_close"] - 1
 
-# Merge returns with features
-silver_df = silver_df.merge(
-    market_df[["timestamp", "SPY_ret_1h", "QQQ_ret_1h"]],
-    on="timestamp",
-    how="left"
-)
+# Optional QQQ support if present in silver table
+HAS_QQQ = "QQQ_close" in silver_df.columns
+if HAS_QQQ:
+    silver_df["QQQ_ret_1h"] = silver_df["QQQ_close"].shift(-1) / silver_df["QQQ_close"] - 1
+    print("✅ Returns calculated (1-hour forward) for SPY and QQQ")
+else:
+    silver_df["QQQ_ret_1h"] = np.nan
+    print("⚠️ QQQ_close not found in silver table. Expansion will use SPY returns unless QQQ is added.")
 
-print("✅ Returns calculated (1-hour forward)")
+# Quick sanity check
+non_null_spy = silver_df["SPY_ret_1h"].notna().mean()
+print(f"   SPY_ret_1h non-null rate: {non_null_spy:.2%}")
 
 # COMMAND ----------
 
@@ -300,12 +293,14 @@ for i in range(len(retrain_dates)-1):
         
         # Get actual returns
         spy_ret = row.get("SPY_ret_1h", 0) if not pd.isna(row.get("SPY_ret_1h")) else 0
-        qqq_ret = row.get("QQQ_ret_1h", 0) if not pd.isna(row.get("QQQ_ret_1h")) else 0
+        qqq_ret = row.get("QQQ_ret_1h", np.nan)
         
         # Calculate strategy returns
         # Conviction-based
         if regime_pred == 0:  # Expansion
-            strat_ret_conv = eq_alloc_conv * qqq_ret
+            # If QQQ isn't available, fall back to SPY to avoid silent zeros
+            expansion_ret = qqq_ret if HAS_QQQ and not pd.isna(qqq_ret) else spy_ret
+            strat_ret_conv = eq_alloc_conv * expansion_ret
         elif regime_pred == 1:  # Slowdown
             strat_ret_conv = eq_alloc_conv * spy_ret
         else:  # Contraction
@@ -313,7 +308,8 @@ for i in range(len(retrain_dates)-1):
         
         # Baseline
         if regime_pred == 0:
-            strat_ret_base = eq_alloc_base * qqq_ret
+            expansion_ret = qqq_ret if HAS_QQQ and not pd.isna(qqq_ret) else spy_ret
+            strat_ret_base = eq_alloc_base * expansion_ret
         elif regime_pred == 1:
             strat_ret_base = eq_alloc_base * spy_ret
         else:
@@ -332,7 +328,7 @@ for i in range(len(retrain_dates)-1):
             "prob_contraction": proba[2],
             "strategy_return": strat_ret_conv,
             "spy_return": spy_ret,
-            "qqq_return": qqq_ret
+            "qqq_return": qqq_ret if not pd.isna(qqq_ret) else np.nan
         })
         
         results_baseline.append({
@@ -342,7 +338,7 @@ for i in range(len(retrain_dates)-1):
             "position": pos_base,
             "strategy_return": strat_ret_base,
             "spy_return": spy_ret,
-            "qqq_return": qqq_ret
+            "qqq_return": qqq_ret if not pd.isna(qqq_ret) else np.nan
         })
 
 print(f"\n✅ Backtest complete: {len(results_conviction)} periods")
@@ -374,7 +370,9 @@ INITIAL_CAPITAL = 10000
 equity_conv = (1 + results_conv_df["strategy_return"]).cumprod() * INITIAL_CAPITAL
 equity_base = (1 + results_base_df["strategy_return"]).cumprod() * INITIAL_CAPITAL
 equity_spy = (1 + results_conv_df["spy_return"]).cumprod() * INITIAL_CAPITAL
-equity_qqq = (1 + results_conv_df["qqq_return"]).cumprod() * INITIAL_CAPITAL
+equity_qqq = None
+if HAS_QQQ:
+    equity_qqq = (1 + results_conv_df["qqq_return"]).cumprod() * INITIAL_CAPITAL
 
 # Plot
 plt.figure(figsize=(14, 6))
@@ -382,7 +380,8 @@ plt.figure(figsize=(14, 6))
 plt.plot(equity_conv.index, equity_conv.values, label="Conviction-Based", linewidth=2, color="blue")
 plt.plot(equity_base.index, equity_base.values, label="Baseline (100% alloc)", linewidth=2, color="orange", linestyle="--")
 plt.plot(equity_spy.index, equity_spy.values, label="SPY Buy&Hold", linewidth=1, color="gray", alpha=0.5)
-plt.plot(equity_qqq.index, equity_qqq.values, label="QQQ Buy&Hold", linewidth=1, color="purple", alpha=0.5)
+if equity_qqq is not None:
+    plt.plot(equity_qqq.index, equity_qqq.values, label="QQQ Buy&Hold", linewidth=1, color="purple", alpha=0.5)
 
 plt.title("Equity Curves: Conviction-Based vs Baseline")
 plt.xlabel("Date")
@@ -450,10 +449,15 @@ print("="*50)
 metrics_conv = calc_metrics(equity_conv, "Conviction-Based")
 metrics_base = calc_metrics(equity_base, "Baseline")
 metrics_spy = calc_metrics(equity_spy, "SPY Buy&Hold")
-metrics_qqq = calc_metrics(equity_qqq, "QQQ Buy&Hold")
+metrics_qqq = None
+if equity_qqq is not None:
+    metrics_qqq = calc_metrics(equity_qqq, "QQQ Buy&Hold")
 
 # Comparison table
-metrics_df = pd.DataFrame([metrics_conv, metrics_base, metrics_spy, metrics_qqq])
+metrics_rows = [metrics_conv, metrics_base, metrics_spy]
+if metrics_qqq is not None:
+    metrics_rows.append(metrics_qqq)
+metrics_df = pd.DataFrame(metrics_rows)
 metrics_df = metrics_df.set_index("name")
 print("\n" + "="*50)
 print("COMPARISON TABLE")

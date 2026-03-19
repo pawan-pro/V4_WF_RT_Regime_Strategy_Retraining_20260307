@@ -27,6 +27,7 @@ backbone = spark.range(0, 15 * 365 * 24) \
 # 3. Load and Deduplicate Bronze Data
 macro_df    = spark.table("pawan_quant_research_1.default.bronze_bt_macro_events").dropDuplicates(["timestamp", "indicator_id"])
 market_df   = spark.table("pawan_quant_research_1.default.bronze_bt_market_1h").filter(F.col("symbol") == "SPY").dropDuplicates(["timestamp"])
+qqq_df      = spark.table("pawan_quant_research_1.default.bronze_bt_market_1h").filter(F.col("symbol") == "QQQ").dropDuplicates(["timestamp"])
 vix3m_df    = spark.table("pawan_quant_research_1.default.bronze_bt_vix3m_1h").dropDuplicates(["timestamp"])
 vix_spot_df = spark.table("pawan_quant_research_1.default.bronze_bt_vix_1h").dropDuplicates(["timestamp"])
 
@@ -61,6 +62,8 @@ silver_grid = (backbone
     .join(macro_prepared, backbone.timestamp == macro_prepared.join_ts, "left")
     .join(market_df.select(F.col("timestamp").alias("m_ts"), F.col("close").alias("SPY_close")),
           F.col("timestamp") == F.col("m_ts"), "left")
+    .join(qqq_df.select(F.col("timestamp").alias("q_ts"), F.col("close").alias("QQQ_close")),
+          F.col("timestamp") == F.col("q_ts"), "left")
     .join(vix3m_lagged.select(F.col("v3m_join_ts").alias("v3m_ts"), F.col("vix3m")),
           F.col("timestamp") == F.col("v3m_ts"), "left")
     .join(vix_spot_df.select(F.col("timestamp").alias("vs_ts"), F.col("close").alias("VIXCLS")),
@@ -69,7 +72,7 @@ silver_grid = (backbone
 
 # 7. Forward Fill 24/7
 win_ffill = Window.orderBy("timestamp").rowsBetween(Window.unboundedPreceding, 0)
-fill_cols = ["CPIAUCSL", "PCEPI", "PCE", "PAYEMS", "UNRATE", "GDPC1", "INDPRO", "UMCSENT", "VIXCLS", "vix3m", "SPY_close"]
+fill_cols = ["CPIAUCSL", "PCEPI", "PCE", "PAYEMS", "UNRATE", "GDPC1", "INDPRO", "UMCSENT", "VIXCLS", "vix3m", "SPY_close", "QQQ_close"]
 
 for col_name in fill_cols:
     silver_grid = silver_grid.withColumn(col_name, F.last(F.col(col_name), True).over(win_ffill))
@@ -107,7 +110,7 @@ silver_grid = silver_grid \
 
 # 9. Final Selection & Save
 final_silver = silver_grid.select(
-    "timestamp", "SPY_close",
+    "timestamp", "SPY_close", "QQQ_close",
     "CPIAUCSL_z", "PCEPI_z", "PCE_z", "PAYEMS_z", "UNRATE_z", "GDPC1_z", "INDPRO_z", "UMCSENT_z",
     "VIXCLS_z", "vix3m_z", "VIX_Inversion_Z", "Price_Mom_24H",
     "CPI_Event_Active", "NFP_Event_Active"
