@@ -60,20 +60,27 @@ CONVICTION_HIGH = 0.6   # ≥60% → Full allocation
 CONVICTION_MED  = 0.4   # 40-60% → 70% allocation
 # <40% → 40% allocation
 
-# Allocation by regime
-if regime == 0:  # Expansion
-    equity = allocation_mult  # QQQ + CASH
-elif regime == 1:  # Slowdown
-    equity = allocation_mult  # SPY + CASH
-else:  # Contraction
-    if conviction == HIGH: equity = 0.0    # 100% CASH
-    elif conviction == MED:  equity = 0.7   # 70% SPY
-    else:                    equity = 0.6   # 60% SPY (low conviction)
+# Allocation by regime and conviction
+# ┌─────────────┬───────────┬────────────┬──────────────┐
+# │ Regime      │ Conviction│ Equity %   │ Position     │
+# ├─────────────┼───────────┼────────────┼──────────────┤
+# │ Expansion   │ HIGH      │ 100% QQQ   │ Full risk    │
+# │ (QQQ)       │ MEDIUM    │ 70% QQQ    │ Moderate     │
+# │             │ LOW       │ 40% QQQ    │ Conservative │
+# ├─────────────┼───────────┼────────────┼──────────────┤
+# │ Slowdown    │ HIGH      │ 100% SPY   │ Full hedge   │
+# │ (SPY)       │ MEDIUM    │ 70% SPY    │ Moderate     │
+# │             │ LOW       │ 40% SPY    │ Conservative │
+# ├─────────────┼───────────┼────────────┼──────────────┤
+# │ Contraction │ HIGH      │ 0% (CASH)  │ Full defense │
+# │ (CASH)      │ MEDIUM    │ 30% SPY    │ Light exposure│
+# │             │ LOW       │ 40% SPY    │ Uncertain    │
+# └─────────────┴───────────┴────────────┴──────────────┘
 ```
 
 **Backtest Comparison:**
-- Baseline: 100% allocation to regime ETF
-- Conviction-based: Scales exposure based on model confidence
+- Baseline: 100% allocation to regime ETF (binary)
+- Conviction-based: Scales exposure based on model confidence (probabilistic)
 
 ## Training Logic
 

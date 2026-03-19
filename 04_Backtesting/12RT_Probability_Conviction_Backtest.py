@@ -179,6 +179,7 @@ def get_conviction_tier(proba):
 def get_allocation_conviction(regime_int, proba):
     """
     Probability-based allocation with conviction scoring
+    All regimes scale allocation based on conviction score.
     
     Returns:
         equity_allocation: float (0-1)
@@ -203,16 +204,19 @@ def get_allocation_conviction(regime_int, proba):
         equity_allocation = allocation_mult
         position_str = f"{int(equity_allocation*100)}% SPY / {int((1-equity_allocation)*100)}% CASH"
         
-    else:  # Contraction → CASH bias
+    else:  # Contraction → CASH (inverse scaling)
+        # High conviction contraction → 100% CASH (0% equity)
+        # Medium conviction → 30% SPY / 70% CASH
+        # Low conviction → 40% SPY / 60% CASH (uncertain, keep some exposure)
         if conviction_tier == "HIGH":
             equity_allocation = 0.0
             position_str = "100% CASH"
         elif conviction_tier == "MEDIUM":
-            equity_allocation = allocation_mult
-            position_str = f"{int(equity_allocation*100)}% SPY / {int((1-equity_allocation)*100)}% CASH"
+            equity_allocation = 0.3
+            position_str = "30% SPY / 70% CASH"
         else:  # LOW conviction contraction
-            equity_allocation = 0.6  # Keep some equity exposure
-            position_str = "60% SPY / 40% CASH"
+            equity_allocation = 0.4
+            position_str = "40% SPY / 60% CASH"
     
     return equity_allocation, position_str, conviction_tier, conviction
 
