@@ -9,8 +9,12 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install alpaca-py
-# MAGIC dbutils.library.restartPython()
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
+
+
 
 import pandas as pd
 from datetime import datetime
@@ -30,7 +34,8 @@ TABLE_NAME  = f"{CATALOG}.{SCHEMA}.bronze_{BT_PREFIX}_market_1h"
 
 ETFS = ["SPY", "QQQ", "MTUM", "USMV", "IQLT", "EFV", "AGG"]
 CREDIT_PROXY = ["HYG"]
-ALL_TICKERS = ETFS + CREDIT_PROXY
+MMF_PROXY = ["BIL","SHV","SGov","PMMF"]
+ALL_TICKERS = ETFS + CREDIT_PROXY + MMF_PROXY
 START_YEAR = 2016 
 END_YEAR = 2026
 

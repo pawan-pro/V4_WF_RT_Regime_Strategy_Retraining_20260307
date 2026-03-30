@@ -3,7 +3,6 @@
 
 # COMMAND ----------
 
-# Databricks notebook source
 # ------------------------------------------------------------
 # IMPORTS
 # ------------------------------------------------------------
@@ -1528,3 +1527,207 @@ yearly_returns.to_csv(f"{EXPORT_PATH}/yearly_returns.csv")
 training_perf.to_csv(f"{EXPORT_PATH}/training_window_performance.csv")
 
 print("CSV files exported to:",EXPORT_PATH)
+
+# COMMAND ----------
+
+# ============================================================
+# TRADE LOG — V4 WALK FORWARD
+# ============================================================
+
+import pandas as pd
+import numpy as np
+
+# ------------------------------------------------------------
+# STEP 1: Get a clean copy of signals with prices merged in
+# ------------------------------------------------------------
+
+trade_signals = signals_df[["timestamp", "predicted_regime"]].copy()
+trade_signals["timestamp"] = pd.to_datetime(trade_signals["timestamp"])
+trade_signals = trade_signals.sort_values("timestamp").reset_index(drop=True)
+
+# Load prices — use whichever source is available in your session
+# Option A: from Spark (hourly, most precise)
+prices_raw = spark.table(
+    "pawan_quant_research_1.default.bronze_bt_market_1h"
+).filter(
+    "symbol IN ('SPY','QQQ')"
+).toPandas()
+
+prices_raw["timestamp"] = pd.to_datetime(prices_raw["timestamp"])
+
+prices_pivot = prices_raw.pivot_table(
+    index="timestamp",
+    columns="symbol",
+    values="close",
+    aggfunc="last"
+).reset_index()
+
+# Merge prices onto signals
+trade_signals = trade_signals.merge(prices_pivot, on="timestamp", how="left")
+trade_signals["SPY"] = trade_signals["SPY"].ffill()
+trade_signals["QQQ"] = trade_signals["QQQ"].ffill()
+
+print("Columns available:", trade_signals.columns.tolist())
+print("Rows:", len(trade_signals))
+print(trade_signals.head())
+
+# ------------------------------------------------------------
+# STEP 2: Build trade log
+# ------------------------------------------------------------
+
+trade_log    = []
+active_asset = "START"
+capital      = 5_000_000
+
+for i in range(1, len(trade_signals)):
+
+    regime    = trade_signals["predicted_regime"].iloc[i - 1]
+    timestamp = trade_signals["timestamp"].iloc[i]
+
+    if regime == 0:
+        target = "QQQ"
+    elif regime == 1:
+        target = "SPY"
+    else:
+        target = "CASH"
+
+    price_now  = trade_signals[target].iloc[i]   if target != "CASH" else None
+    price_prev = trade_signals[target].iloc[i-1] if target != "CASH" else None
+
+    ret  = (price_now / price_prev - 1) if target != "CASH" else 0
+    cost = 0.0005 if target != active_asset else 0
+
+    if target != active_asset:
+        trade_log.append({
+            "timestamp"        : timestamp,
+            "from_asset"       : active_asset,
+            "to_asset"         : target,
+            "regime"           : int(regime),
+            "price_entry"      : price_now,
+            "transaction_cost" : cost,
+            "portfolio_value"  : round(capital, 2)
+        })
+
+    capital      *= (1 + ret - cost)
+    active_asset  = target
+
+trades_df = pd.DataFrame(trade_log)
+trades_df["timestamp"] = pd.to_datetime(trades_df["timestamp"])
+
+print(f"\nTotal regime switches (trades): {len(trades_df)}")
+print(f"\nTrade breakdown:\n{trades_df['to_asset'].value_counts()}")
+display(trades_df)
+
+# COMMAND ----------
+
+# ============================================================
+# TRADE LOG — V3 WALK FORWARD
+# ============================================================
+
+import pandas as pd
+import numpy as np
+
+# ------------------------------------------------------------
+# STEP 1: Load V3 signals + merge prices
+# ------------------------------------------------------------
+
+v3_signals = pd.read_csv(
+    "/Workspace/Users/pawan.jatale@mubama.group/backup/Global-Dynamic-Factor-Rotation/Global Factors/notebooks/v3_walkforward_predictions.csv",
+    index_col=0,
+    parse_dates=True
+)[["predicted_regime"]].copy()
+
+v3_signals.index.name = "timestamp"
+v3_signals = v3_signals.reset_index()
+v3_signals["timestamp"] = pd.to_datetime(v3_signals["timestamp"])
+v3_signals = v3_signals.sort_values("timestamp").reset_index(drop=True)
+
+# V3 is weekly — resample to daily then forward-fill to hourly
+# to align with the same price grid used in the master comparison
+v3_signals = v3_signals.set_index("timestamp")
+v3_signals = v3_signals.resample("h").ffill()   # hourly forward-fill
+v3_signals = v3_signals.reset_index()
+
+print("V3 signal rows:", len(v3_signals))
+print("Range:", v3_signals.timestamp.min(), "→", v3_signals.timestamp.max())
+
+# ------------------------------------------------------------
+# STEP 2: Load prices (reuse if already in session)
+# ------------------------------------------------------------
+
+if "prices_pivot" not in dir():
+    prices_raw = spark.table(
+        "pawan_quant_research_1.default.bronze_bt_market_1h"
+    ).filter(
+        "symbol IN ('SPY','QQQ')"
+    ).toPandas()
+
+    prices_raw["timestamp"] = pd.to_datetime(prices_raw["timestamp"])
+
+    prices_pivot = prices_raw.pivot_table(
+        index="timestamp",
+        columns="symbol",
+        values="close",
+        aggfunc="last"
+    ).reset_index()
+
+# Merge prices onto V3 signals
+v3_trade_signals = v3_signals.merge(prices_pivot, on="timestamp", how="left")
+v3_trade_signals["SPY"] = v3_trade_signals["SPY"].ffill()
+v3_trade_signals["QQQ"] = v3_trade_signals["QQQ"].ffill()
+
+# Trim to live period only (match V4 start)
+v3_trade_signals = v3_trade_signals[
+    v3_trade_signals["timestamp"] >= "2021-01-01"
+].reset_index(drop=True)
+
+print("Columns:", v3_trade_signals.columns.tolist())
+print("Rows after trim:", len(v3_trade_signals))
+print(v3_trade_signals.head())
+
+# ------------------------------------------------------------
+# STEP 3: Build V3 trade log
+# ------------------------------------------------------------
+
+trade_log_v3 = []
+active_asset  = "START"
+capital       = 5_000_000
+
+for i in range(1, len(v3_trade_signals)):
+
+    regime    = v3_trade_signals["predicted_regime"].iloc[i - 1]
+    timestamp = v3_trade_signals["timestamp"].iloc[i]
+
+    if regime == 0:
+        target = "QQQ"
+    elif regime == 1:
+        target = "SPY"
+    else:
+        target = "CASH"
+
+    price_now  = v3_trade_signals[target].iloc[i]   if target != "CASH" else None
+    price_prev = v3_trade_signals[target].iloc[i-1] if target != "CASH" else None
+
+    ret  = (price_now / price_prev - 1) if target != "CASH" else 0
+    cost = 0.0005 if target != active_asset else 0
+
+    if target != active_asset:
+        trade_log_v3.append({
+            "timestamp"       : timestamp,
+            "from_asset"      : active_asset,
+            "to_asset"        : target,
+            "regime"          : int(regime),
+            "price_entry"     : price_now,
+            "transaction_cost": cost,
+            "portfolio_value" : round(capital, 2)
+        })
+
+    capital      *= (1 + ret - cost)
+    active_asset  = target
+
+v3_trades_df = pd.DataFrame(trade_log_v3)
+v3_trades_df["timestamp"] = pd.to_datetime(v3_trades_df["timestamp"])
+
+print(f"\nTotal V3 WalkForward trades: {len(v3_trades_df)}")
+print(f"\nTrade breakdown:\n{v3_trades_df['to_asset'].value_counts()}")
+display(v3_trades_df)
