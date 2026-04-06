@@ -6,15 +6,27 @@
     "timezone_id": "America/New_York",
     "pause_status": "UNPAUSED"
   },
+  "job_clusters": [
+    {
+      "job_cluster_key": "v4_job_cluster",
+      "new_cluster": {
+        "spark_version": "15.4.x-scala2.12",
+        "node_type_id": "r6i.xlarge",
+        "num_workers": 1,
+        "data_security_mode": "SINGLE_USER",
+        "runtime_engine": "STANDARD"
+      }
+    }
+  ],
   "max_concurrent_runs": 1,
   "tasks": [
     {
       "task_key": "rt_01_market",
+      "job_cluster_key": "v4_job_cluster",
       "libraries": [
         {"pypi": {"package": "alpaca-py==0.43.2"}},
         {"pypi": {"package": "nest_asyncio==1.6.0"}}
       ],
-      "existing_cluster_id": "{{classic_cluster_id}}",
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/01_RT_Live_Market_Ingestion"
       }
@@ -22,10 +34,10 @@
     {
       "task_key": "rt_02_vix",
       "depends_on": [{"task_key": "rt_01_market"}],
+      "job_cluster_key": "v4_job_cluster",
       "libraries": [
         {"pypi": {"package": "fredapi==0.5.2"}}
       ],
-      "existing_cluster_id": "{{classic_cluster_id}}",
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/02_RT_Live_Rates_VIX_Ingestion"
       }
@@ -33,7 +45,7 @@
     {
       "task_key": "rt_03_silver",
       "depends_on": [{"task_key": "rt_02_vix"}],
-      "existing_cluster_id": "{{classic_cluster_id}}",
+      "job_cluster_key": "v4_job_cluster",
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/03_RT_Silver_RT_Enrichment"
       }
@@ -41,10 +53,10 @@
     {
       "task_key": "rt_04_inference",
       "depends_on": [{"task_key": "rt_03_silver"}],
+      "job_cluster_key": "v4_job_cluster",
       "libraries": [
         {"pypi": {"package": "xgboost==3.1.1"}}
       ],
-      "existing_cluster_id": "{{classic_cluster_id}}",
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/04_RT_Model_Inference_Engine"
       }
@@ -52,10 +64,10 @@
     {
       "task_key": "rt_05_trade",
       "depends_on": [{"task_key": "rt_04_inference"}],
+      "job_cluster_key": "v4_job_cluster",
       "libraries": [
         {"pypi": {"package": "alpaca-py==0.43.2"}}
       ],
-      "existing_cluster_id": "{{classic_cluster_id}}",
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/05_RT_Paper_Trade_Execution"
       }
@@ -63,7 +75,7 @@
     {
       "task_key": "rt_06_audit",
       "depends_on": [{"task_key": "rt_05_trade"}],
-      "existing_cluster_id": "{{classic_cluster_id}}",
+      "job_cluster_key": "v4_job_cluster",
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/06_RT_Signal_Audit_Log"
       }
@@ -71,7 +83,7 @@
     {
       "task_key": "rt_07_dashboard",
       "depends_on": [{"task_key": "rt_06_audit"}],
-      "existing_cluster_id": "{{classic_cluster_id}}",
+      "job_cluster_key": "v4_job_cluster",
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/07_RT_Dashboard_Feed"
       }
@@ -79,7 +91,7 @@
     {
       "task_key": "rt_08_live_portfolio",
       "depends_on": [{"task_key": "rt_07_dashboard"}],
-      "existing_cluster_id": "{{classic_cluster_id}}",
+      "job_cluster_key": "v4_job_cluster",
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/02_Analysis/02_Dashboard/02_Live_Portfolio_Performance"
       }
