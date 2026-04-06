@@ -55,6 +55,13 @@
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/07_RT_Dashboard_Feed"
       }
+    },
+    {
+      "task_key": "rt_08_live_portfolio",
+      "depends_on": [{"task_key": "rt_07_dashboard"}],
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/02_Analysis/02_Dashboard/02_Live_Portfolio_Performance"
+      }
     }
   ]
 }
