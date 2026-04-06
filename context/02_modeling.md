@@ -43,16 +43,18 @@ model = xgb.XGBClassifier(
     n_estimators=200,
     max_depth=4,
     learning_rate=0.03,
-    objective="multi:softprob",
+    objective="multi:softmax",
     num_class=3,
-    eval_metric="mlogloss",
+    eval_metric="merror",
     random_state=42
 )
 ```
 
-## Conviction-Based Allocation (Experimental)
+## Conviction-Based Allocation (Research Only)
 
-**Script:** `04_Backtesting/12RT_Probability_Conviction_Backtest.py`
+**Script:** `research/testing/12RT_Probability_Conviction_Backtest.ipynb`
+
+This notebook is not part of the production model or live execution path. The production system remains fixed allocation by predicted regime only.
 
 ```python
 # Conviction thresholds
@@ -84,19 +86,20 @@ CONVICTION_MED  = 0.4   # 40-60% → 70% allocation
 
 ## Training Logic
 
-**Script:** `03_Modeling/06RT_XGBoost_Regime_V4_Training.py`
+**Production Script:** `processing/retraining/Monthly_Walkforward_Retrain.py`
+**Research Baseline:** `research/testing/06RT_XGBoost_Regime_V4_Training.py`
 
 1. **Data Load:** Silver master grid from Unity Catalog
 2. **Label Creation:** Forward 1-week SPY returns → regime labels
-3. **Train/Test Split:** TimeSeriesSplit (walk-forward)
-4. **Training:** XGBoost with class weights
-5. **Evaluation:** Classification report, confusion matrix
-6. **Feature Importance:** Saved for alpha analysis
-7. **Model Export:** `bt_fred_1d_xgboost_regime.joblib`
+3. **Train/Test Split:** Monthly expanding-window walk-forward
+4. **Training:** XGBoost with monthly re-estimation on completed data
+5. **Evaluation:** Monthly walk-forward validation metrics written to `/performance/summary/`
+6. **Model Export:** Versioned monthly artifact under `/Volumes/pawan_quant_research_1/v4/market_data/models/`
+7. **Promotion:** Latest validated model is copied to the stable live alias consumed by RT inference
 
 ## Inference Logic
 
-**Script:** `02_RealTime/RT_04_Model_Inference_Engine.py`
+**Script:** `processing/realtime/RT_04_Model_Inference_Engine.py`
 
 ```python
 # Load latest silver row
@@ -107,7 +110,6 @@ X_rt = latest_row[FEATURES].fillna(0)
 
 # Predict
 regime_int = int(model.predict(X_rt)[0])
-proba = model.predict_proba(X_rt)[0]
 
 # Map to position
 REGIME_MAP   = {0: "Expansion", 1: "Slowdown", 2: "Recession"}
@@ -121,17 +123,15 @@ POSITION_MAP = {0: "100% QQQ",  1: "100% SPY",  2: "100% CASH"}
 | Column | Type | Description |
 |--------|------|-------------|
 | timestamp | TIMESTAMP | Inference timestamp |
-| regime_predicted | INTEGER | 0/1/2 |
+| regime_int | INTEGER | 0/1/2 |
 | regime_name | STRING | Expansion/Slowdown/Recession |
-| position_recommended | STRING | 100% QQQ/SPY/CASH |
-| prob_expansion | DOUBLE | P(regime=0) |
-| prob_slowdown | DOUBLE | P(regime=1) |
-| prob_recession | DOUBLE | P(regime=2) |
-| [macro features...] | DOUBLE | All 14 features logged |
+| position | STRING | 100% QQQ/SPY/CASH |
+| [macro features...] | DOUBLE | Full feature vector logged |
+| model_version | STRING | Promoted monthly model version |
 
 ## Retraining Cadence
 
-- **Frequency:** Weekly (recommended)
-- **Trigger:** New macro data releases
-- **Validation:** Walk-forward on expanding window
-- **Model Registry:** Unity Catalog (pending implementation)
+- **Frequency:** Monthly, on the 1st day of the month
+- **Trigger:** Prior month close plus fresh historical slices
+- **Validation:** Monthly expanding-window walk-forward
+- **Model Registry:** `pawan_quant_research_1.v4.model_registry_current`

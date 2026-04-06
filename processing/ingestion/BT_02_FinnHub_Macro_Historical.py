@@ -1,5 +1,5 @@
 # Databricks notebook source
-!pip install finnhub-python
+# MAGIC %pip install finnhub-python
 
 # COMMAND ----------
 

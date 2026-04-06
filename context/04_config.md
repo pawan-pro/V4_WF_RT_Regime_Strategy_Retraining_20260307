@@ -35,8 +35,9 @@ VOLUME  = "market_data"
 
 | File | Path | Description |
 |------|------|-------------|
-| Training Model | `/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_xgboost_regime.joblib` | Batch-trained XGBoost |
-| Inference Model | Same as above | Loaded by RT_04 |
+| Versioned Monthly Model | `/Volumes/pawan_quant_research_1/v4/market_data/models/bt_fred_1d_xgboost_regime_YYYY_MM_01.joblib` | Monthly walk-forward promoted artifact |
+| Live Inference Alias | `/Volumes/pawan_quant_research_1/v4/market_data/models/bt_fred_1d_xgboost_regime_live.joblib` | Stable RT_04 load target |
+| Performance Exports | `/Volumes/pawan_quant_research_1/v4/market_data/performance/` | Daily/weekly/monthly/quarterly/yearly/summary CSV outputs |
 
 ## API Integrations
 
@@ -84,7 +85,7 @@ VIX3M_LAG_DAYS = 1     # VIX3M +1D (if Portara source)
 ## VIX Source Configuration
 
 ```python
-# In 05RT_Master_Time_Grid_Silver.py
+# In processing/features/BT_05_Master_Time_Grid_Silver.py
 VIX_SOURCE = "fred_1d"   # Options: "fred_1d" | "portara_1h"
 
 # fred_1d:    Daily FRED data, PIT already applied at ingestion
@@ -93,14 +94,22 @@ VIX_SOURCE = "fred_1d"   # Options: "fred_1d" | "portara_1h"
 
 ## Databricks Workflow Config
 
-**File:** `04_Orchestration/Workflow_Definition.json`
+**Files:** `04_Orchestration/workflows/v4_rt_hourly_chain.json`, `04_Orchestration/workflows/v4_macro_hourly_maintenance.json`, `04_Orchestration/workflows/v4_monthly_retraining.json`
 
 ```json
 {
-  "schedule": "0 9-16 * * 1-5",  # Every hour, 9 AM - 4 PM, Mon-Fri
-  "timezone": "America/New_York",
-  "tasks": ["RT_01", "RT_02", "RT_03", "RT_04", "RT_05", "RT_06", "RT_07"],
-  "retry_policy": {"max_retries": 3, "backoff_multiplier": 2}
+  "hourly_chain": {
+    "schedule": "hourly on trading days shortly after bar close",
+    "tasks": ["RT_01", "RT_02", "RT_03", "RT_04", "RT_05", "RT_06", "RT_07"]
+  },
+  "macro_hourly_maintenance": {
+    "schedule": "hourly on weekdays during US release windows",
+    "tasks": ["macro_incremental", "silver_refresh"]
+  },
+  "monthly_retraining": {
+    "schedule": "1st day of month at end of US trading day",
+    "tasks": ["macro_incremental", "silver_refresh", "monthly_walkforward_retrain", "performance_exports"]
+  }
 }
 ```
 
@@ -130,28 +139,35 @@ datetime
 
 ```
 V4_WF_RT_Regime_Strategy_Retraining_20260307/
-├── 00_Config/
-│   └── Global_Constants.py
-├── 01_Data_Factory/
-│   ├── 01RT_Alpaca_Market_Ingestion.py
-│   ├── 02RT_FinnHub_Macro_Ingestion.py
-│   ├── 03RT_Firstrate_Ingestion.py
-│   └── 04RT_Portara_VIX_Ingestion.py
-├── 02_Feature_Engineering/
-│   └── 05RT_Master_Time_Grid_Silver.py
-├── 02_RealTime/
-│   ├── RT_01_Live_Market_Ingestion.py
-│   ├── RT_02_Live_Rates_VIX_Ingestion.py
-│   ├── RT_03_Silver_RT_Enrichment.py
-│   ├── RT_04_Model_Inference_Engine.py
-│   ├── RT_05_Paper_Trade_Execution.py
-│   ├── RT_05A_Saxo_Trade_Execution.py
-│   ├── RT_06_Signal_Audit_Log.py
-│   └── RT_07_Dashboard_Feed.py
-├── 03_Modeling/
-│   └── 06RT_XGBoost_Regime_V4_Training.py
+├── processing/
+│   ├── ingestion/
+│   │   ├── BT_01_Alpaca_Market_Ingestion.py
+│   │   ├── BT_02_FinnHub_Macro_Historical.py
+│   │   ├── BT_02_Macro_Incremental_Update.py
+│   │   ├── BT_03_Firstrate_Rates_Ingestion.py
+│   │   └── BT_04_Portara_VIX_Ingestion.py
+│   ├── features/
+│   │   ├── BT_05_Master_Time_Grid_Silver.py
+│   │   └── BT_05_Incremental_Silver_Refresh.py
+│   ├── realtime/
+│   │   ├── RT_01_Live_Market_Ingestion.py
+│   │   ├── RT_02_Live_Rates_VIX_Ingestion.py
+│   │   ├── RT_03_Silver_RT_Enrichment.py
+│   │   ├── RT_04_Model_Inference_Engine.py
+│   │   ├── RT_05_Paper_Trade_Execution.py
+│   │   ├── RT_05A_Saxo_Trade_Execution.py
+│   │   ├── RT_06_Signal_Audit_Log.py
+│   │   └── RT_07_Dashboard_Feed.py
+│   └── retraining/
+│       └── Monthly_Walkforward_Retrain.py
+├── analysis/
+│   ├── dashboard/
+│   └── performance/
 ├── 04_Orchestration/
-│   └── Workflow_Definition.json
+│   └── workflows/
+├── research/
+│   ├── archive/
+│   └── testing/
 └── context/
     ├── overview.md
     ├── modeling.md

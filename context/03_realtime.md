@@ -55,19 +55,18 @@ Applies the **same feature logic** as batch training:
 
 ```python
 # Load model
-model = joblib.load("/Volumes/.../bt_fred_1d_xgboost_regime.joblib")
+model = joblib.load("/Volumes/.../models/bt_fred_1d_xgboost_regime_live.joblib")
 
 # Get latest features
 latest_row = spark.sql("SELECT * FROM silver_rt_1h ORDER BY timestamp DESC LIMIT 1")
 
 # Predict
 regime = model.predict(X_rt)[0]
-proba = model.predict_proba(X_rt)[0]
 
 # Write signal
 spark.sql(f"""
     INSERT INTO bronze_rt_regime_signal 
-    VALUES (timestamp, regime, proba[0], proba[1], proba[2], ...)
+    VALUES (timestamp, regime, ...)
 """)
 ```
 
@@ -107,7 +106,7 @@ Appends every signal + portfolio state to Delta table for:
 **Script:** `RT_07_Dashboard_Feed.py`
 
 Writes PowerBI-ready Delta tables:
-- Current regime + probabilities
+- Current regime + full feature context
 - Position history
 - P&L tracking (if live)
 
@@ -125,12 +124,13 @@ Market  Macro   Silver  Infer   Trade   Audit   Dashboard
 
 ## Orchestration
 
-Managed via **Databricks Workflows** (`04_Orchestration/Workflow_Definition.json`)
+Managed via **Databricks Workflows** in `04_Orchestration/workflows/`
 
 - **Schedule:** Every hour during market hours (9:30 AM - 4:00 PM ET)
 - **Dependencies:** RT_02 depends on RT_01, RT_03 depends on RT_01+RT_02, etc.
 - **Retry Logic:** 3 retries with exponential backoff
 - **Alerting:** Email/Slack on failure
+- **Macro Maintenance:** `v4_macro_hourly_maintenance.json` runs `BT_02_Macro_Incremental_Update` and `BT_05_Incremental_Silver_Refresh` hourly on weekdays so new macro releases can flow into refreshed silver state before later inference runs
 
 ## Latency Targets
 

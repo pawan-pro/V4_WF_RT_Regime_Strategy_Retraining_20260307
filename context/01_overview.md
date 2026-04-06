@@ -65,9 +65,13 @@ Real-time regime detection system for ETF rotation strategy using XGBoost classi
 
 ## Orchestration
 
-Databricks Workflow defined in `04_Orchestration/Workflow_Definition.json`
+Databricks workflows are versioned in `04_Orchestration/workflows/`
+
+- `v4_rt_hourly_chain.json` runs the hourly live inference path
+- `v4_macro_hourly_maintenance.json` updates macro and refreshes batch silver during the trading day
+- `v4_monthly_retraining.json` runs end-of-day on the 1st of the month
 
 ## Backtesting
 
-- `11RT_WalkForward_Simulation.py` – Baseline walk-forward with 100% allocation
-- `12RT_Probability_Conviction_Backtest.py` – Probability-based allocation with conviction scoring
+- `processing/retraining/Monthly_Walkforward_Retrain.py` – Production monthly walk-forward retraining and live-model promotion
+- `research/testing/12RT_Probability_Conviction_Backtest.ipynb` – Research-only conviction experiment, not used in production
