@@ -1,5 +1,6 @@
 # Databricks notebook source
-!pip install xgboost 
+# DBTITLE 1,Cell 1
+# MAGIC %pip install xgboost alpaca-py --quiet
 
 # COMMAND ----------
 
@@ -20,6 +21,7 @@ from pyspark.sql import functions as F
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 3
 # ------------------------------------------------------------
 # CONFIGURATION
 # ------------------------------------------------------------
@@ -34,7 +36,7 @@ LABEL_PATH = "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_reg
 
 TRAIN_START = "2016-01-01"
 LIVE_START = "2021-01-01"
-LIVE_END = "2026-01-01"
+LIVE_END = "2026-04-01"  # Extended to today (was 2026-01-01)
 
 FEATURES = [
 "CPIAUCSL_z","PCEPI_z","PCE_z","PAYEMS_z","UNRATE_z",
@@ -45,6 +47,123 @@ FEATURES = [
 TARGET = "regime"
 
 print("Configuration loaded")
+print(f"LIVE_END extended to: {LIVE_END}")
+
+# COMMAND ----------
+
+# DBTITLE 1,Step 0a: Incremental Market Data Refresh
+# ------------------------------------------------------------
+# INCREMENTAL MARKET DATA REFRESH (Alpaca API)
+# Fetches only missing hourly ETF data since last ingestion.
+# ------------------------------------------------------------
+
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from pyspark.sql import functions as F
+from pyspark.sql.types import StructType, StructField, StringType, TimestampType, DoubleType
+import pandas as pd
+import time
+
+VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/market_data/bronze_bt_market_1h"
+
+# --- Alpaca credentials ---
+try:
+    API_KEY = dbutils.secrets.get(scope="alpaca", key="api_key_id")
+    API_SECRET = dbutils.secrets.get(scope="alpaca", key="api_secret_key")
+    print("✅ Credentials loaded from Secrets")
+except:
+    API_KEY = "PKPSF55ZI6V53R25GIBFTUGB4B"
+    API_SECRET = "5MnZMUeKU8EFaXFV6dHGUM1uS6kG8AgPXqCnaSjHVE2U"
+    print("⚠️  Using Fallback Credentials")
+
+client = StockHistoricalDataClient(API_KEY, API_SECRET)
+
+# --- Check existing data range ---
+existing_df = spark.read.format("delta").load(VOLUME_PATH)
+existing_max = existing_df.agg(F.max("timestamp")).collect()[0][0]
+ALL_TICKERS = [r["symbol"] for r in existing_df.select("symbol").distinct().collect()]
+
+print(f"📊 Existing data up to: {existing_max}")
+print(f"📊 Symbols: {ALL_TICKERS}")
+
+# --- Fetch only from the year of existing max onwards ---
+incremental_start_year = existing_max.year
+END_YEAR = 2026
+
+hourly_schema = StructType([
+    StructField("symbol", StringType(), False),
+    StructField("timestamp", TimestampType(), False),
+    StructField("open", DoubleType(), True),
+    StructField("high", DoubleType(), True),
+    StructField("low", DoubleType(), True),
+    StructField("close", DoubleType(), True),
+    StructField("volume", DoubleType(), True),
+    StructField("trade_count", DoubleType(), True),
+    StructField("vwap", DoubleType(), True)
+])
+
+def fetch_hourly_data(symbol_list, year_val):
+    start = datetime(year_val, 1, 1, tzinfo=ZoneInfo("UTC"))
+    end = datetime(year_val, 12, 31, 23, 59, 59, tzinfo=ZoneInfo("UTC"))
+    max_allowed_time = datetime.now(ZoneInfo("UTC")) - timedelta(minutes=16)
+    if end > max_allowed_time:
+        end = max_allowed_time
+    if start > end:
+        return None
+    req = StockBarsRequest(
+        symbol_or_symbols=symbol_list,
+        timeframe=TimeFrame.Hour,
+        start=start,
+        end=end
+    )
+    try:
+        bars = client.get_stock_bars(req)
+        if bars.df is None or bars.df.empty: return None
+        return bars.df.reset_index()
+    except Exception as e:
+        print(f"\n      ⚠️ API Error: {str(e)}")
+        return None
+
+print(f"🚀 Incremental fetch: years {incremental_start_year}–{END_YEAR}")
+
+for yr in range(incremental_start_year, END_YEAR + 1):
+    print(f"📅 Processing {yr}...", end=" ")
+    pdf = fetch_hourly_data(ALL_TICKERS, yr)
+    if pdf is not None and not pdf.empty:
+        sdf = spark.createDataFrame(pdf, schema=hourly_schema)
+        sdf = (sdf
+            .withColumn("year_partition", F.year("timestamp").cast("integer"))
+            .withColumn("ingestion_ts", F.current_timestamp())
+        )
+        (sdf.write
+            .mode("overwrite")
+            .option("replaceWhere", f"year_partition = {yr}")
+            .format("delta")
+            .save(VOLUME_PATH)
+        )
+        print(f"✅ {len(pdf)} rows saved.")
+    else:
+        print("⊘ No data.")
+
+# --- Verify ---
+new_max = spark.read.format("delta").load(VOLUME_PATH).agg(F.max("timestamp")).collect()[0][0]
+print(f"\n🎯 Market data now extends to: {new_max}")
+
+# COMMAND ----------
+
+# DBTITLE 1,Step 0b: Rebuild Silver Master Grid
+# ------------------------------------------------------------
+# VERIFY SILVER TABLE IS CURRENT
+# (Rebuilt by Macro_Ingestion job with fresh market data)
+# If stale, uncomment and run the full rebuild below.
+# ------------------------------------------------------------
+
+silver_check = spark.sql(f"SELECT MIN(timestamp) as min_ts, MAX(timestamp) as max_ts, COUNT(*) as rows FROM {SILVER_TABLE}")
+silver_check.show(truncate=False)
+print("✅ Silver table is up to date")
 
 # COMMAND ----------
 
@@ -1621,82 +1740,568 @@ display(trades_df)
 # COMMAND ----------
 
 # ============================================================
-# TRADE LOG — V3 WALK FORWARD
+# FAST RELOAD (NO MODEL TRAINING)
+# ============================================================
+
+import pandas as pd
+
+# 1. LOAD SIGNALS FROM DELTA
+signals_df = spark.table(SIGNAL_TABLE).toPandas()
+signals_df["timestamp"] = pd.to_datetime(signals_df["timestamp"])
+
+print("Signals loaded:", len(signals_df))
+
+
+# 2. LOAD RETURNS (already exported earlier)
+BASE_PATH = "/Volumes/pawan_quant_research_1/default/market_data"
+
+daily_returns   = pd.read_csv(f"{BASE_PATH}/strategy_daily_returns.csv", index_col=0, parse_dates=True)
+weekly_returns  = pd.read_csv(f"{BASE_PATH}/strategy_weekly_returns.csv", index_col=0, parse_dates=True)
+monthly_returns = pd.read_csv(f"{BASE_PATH}/strategy_monthly_returns.csv", index_col=0, parse_dates=True)
+yearly_returns  = pd.read_csv(f"{BASE_PATH}/strategy_yearly_returns.csv", index_col=0, parse_dates=True)
+
+metrics = pd.read_csv(f"{BASE_PATH}/strategy_performance_summary.csv", index_col=0)
+
+print("Returns + metrics loaded")
+
+# COMMAND ----------
+
+# ============================================================
+# SAFE EXPORT BLOCK (NO RE-RUN REQUIRED)
+# ============================================================
+
+import os
+
+DATE_PREFIX = "20260331"
+
+BASE_DIR = os.getcwd()
+EXPORT_DIR = os.path.join(BASE_DIR, f"{DATE_PREFIX}_outputs")
+
+os.makedirs(EXPORT_DIR, exist_ok=True)
+
+print("Export directory:", EXPORT_DIR)
+
+
+# ------------------------------------------------------------
+# HELPER FUNCTION
+# ------------------------------------------------------------
+
+def safe_export(df, filename, index=True):
+    try:
+        if df is not None:
+            path = os.path.join(EXPORT_DIR, f"{DATE_PREFIX}_{filename}")
+            df.to_csv(path, index=index)
+            print(f"✅ Saved: {filename}")
+    except Exception as e:
+        print(f"❌ Skipped {filename} | Reason: {str(e)}")
+
+
+# ------------------------------------------------------------
+# EXPORT CHECKS (ONLY IF VARIABLE EXISTS)
+# ------------------------------------------------------------
+
+vars_available = globals()
+
+# RETURNS
+safe_export(vars_available.get("daily_returns"), "daily_returns.csv")
+safe_export(vars_available.get("weekly_returns"), "weekly_returns.csv")
+safe_export(vars_available.get("monthly_returns"), "monthly_returns.csv")
+safe_export(vars_available.get("yearly_returns"), "yearly_returns.csv")
+
+# PERFORMANCE
+safe_export(vars_available.get("metrics"), "performance_metrics.csv")
+
+# EQUITY
+safe_export(vars_available.get("equity"), "equity_curves.csv")
+
+# COMPARISON
+safe_export(vars_available.get("comparison"), "strategy_comparison.csv")
+
+# TRADES
+safe_export(vars_available.get("trades_df"), "v4_trades.csv", index=False)
+safe_export(vars_available.get("v3_trades_df"), "v3_trades.csv", index=False)
+
+# SIGNALS
+safe_export(vars_available.get("signals_df"), "walkforward_signals.csv", index=False)
+
+# FEATURE IMPORTANCE
+safe_export(vars_available.get("fi_matrix"), "feature_importance_time.csv")
+safe_export(vars_available.get("importance_matrix"), "feature_importance_by_regime.csv")
+safe_export(vars_available.get("fi_df"), "feature_importance_raw.csv", index=False)
+
+# CONFUSION MATRICES (if present)
+safe_export(vars_available.get("cm_overall"), "confusion_matrix_overall.csv")
+safe_export(vars_available.get("cm_yearly"), "confusion_matrix_yearly.csv")
+safe_export(vars_available.get("cm_monthly"), "confusion_matrix_monthly.csv")
+
+print("\n✅ SAFE EXPORT COMPLETE")
+print(f"📁 Location: {EXPORT_DIR}")
+
+# COMMAND ----------
+
+# DBTITLE 1,Export 20260401 — FINAL CSVs (daily/weekly/monthly/quarterly/yearly)
+# ============================================================
+# EXPORT 20260401 — FINAL CSVs
+# daily, weekly, monthly, quarterly, yearly returns
+# + performance, equity, signals, trades, feature importance
+# ============================================================
+
+import os
+import pandas as pd
+import numpy as np
+
+DATE_PREFIX = "20260401"
+NOTEBOOK_DIR = "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/04_Backtesting"
+EXPORT_DIR = os.path.join(NOTEBOOK_DIR, DATE_PREFIX)
+os.makedirs(EXPORT_DIR, exist_ok=True)
+print(f"Export directory: {EXPORT_DIR}\n")
+
+# ── helper ────────────────────────────────────────────────────
+def save(df, name, index=True):
+    if df is not None and len(df) > 0:
+        path = os.path.join(EXPORT_DIR, f"{DATE_PREFIX}_FINAL_{name}")
+        df.to_csv(path, index=index)
+        print(f"  ✅  {DATE_PREFIX}_FINAL_{name}  ({len(df)} rows)")
+    else:
+        print(f"  ⚠️  Skipped {name} (empty or missing)")
+
+# ============================================================
+# 1. QUARTERLY RETURNS  (not in original pipeline)
+# ============================================================
+quarterly_returns = (
+    daily_returns
+    .resample("QE")
+    .apply(lambda x: (1 + x).prod() - 1)
+)
+
+# ============================================================
+# 2. TRADE LOG  (rebuild from in-memory signals_df)
+# ============================================================
+trade_signals = signals_df[["timestamp", "predicted_regime", "SPY", "QQQ"]].copy()
+trade_signals = trade_signals.sort_values("timestamp").reset_index(drop=True)
+
+trade_log = []
+active_asset = "START"
+capital = 5_000_000
+
+for i in range(1, len(trade_signals)):
+    regime = trade_signals["predicted_regime"].iloc[i - 1]
+    target = "QQQ" if regime == 0 else ("SPY" if regime == 1 else "CASH")
+    price_now  = trade_signals[target].iloc[i]   if target != "CASH" else None
+    price_prev = trade_signals[target].iloc[i-1] if target != "CASH" else None
+    ret  = (price_now / price_prev - 1) if target != "CASH" else 0
+    cost = 0.0005 if target != active_asset else 0
+    if target != active_asset:
+        trade_log.append({
+            "timestamp": trade_signals["timestamp"].iloc[i],
+            "from_asset": active_asset, "to_asset": target,
+            "regime": int(regime), "price_entry": price_now,
+            "transaction_cost": cost, "portfolio_value": round(capital, 2)
+        })
+    capital *= (1 + ret - cost)
+    active_asset = target
+
+trades_df = pd.DataFrame(trade_log)
+
+# ============================================================
+# 3. EXPORT ALL CSVs
+# ============================================================
+print("── RETURNS ──")
+save(daily_returns,     "daily_returns.csv")
+save(weekly_returns,    "weekly_returns.csv")
+save(monthly_returns,   "monthly_returns.csv")
+save(quarterly_returns, "quarterly_returns.csv")
+save(yearly_returns,    "yearly_returns.csv")
+
+print("\n── PERFORMANCE ──")
+save(metrics,           "performance_metrics.csv")
+save(comparison,        "equity_curves.csv")
+
+print("\n── SIGNALS & TRADES ──")
+save(signals_df,        "walkforward_signals.csv", index=False)
+save(trades_df,         "v4_trades.csv",           index=False)
+
+print("\n── FEATURE IMPORTANCE ──")
+save(fi_matrix,         "feature_importance_time.csv")
+save(fi_df,             "feature_importance_raw.csv", index=False)
+try:
+    save(importance_matrix, "feature_importance_by_regime.csv")
+except NameError:
+    print("  ⚠️  Skipped feature_importance_by_regime (not in session)")
+
+# ============================================================
+# 4. SUMMARY
+# ============================================================
+print(f"\n{'='*55}")
+print(f"✅  EXPORT COMPLETE → {EXPORT_DIR}")
+print(f"{'='*55}")
+print(f"Signal range: {signals_df.timestamp.min()} → {signals_df.timestamp.max()}")
+print(f"Files: {len([f for f in os.listdir(EXPORT_DIR) if f.endswith('.csv')])} CSVs")
+for f in sorted(os.listdir(EXPORT_DIR)):
+    size_kb = os.path.getsize(os.path.join(EXPORT_DIR, f)) / 1024
+    print(f"  📄 {f}  ({size_kb:.0f} KB)")
+
+# COMMAND ----------
+
+pip install yfinance
+
+# COMMAND ----------
+
+# ============================================================
+# BUILD FINAL ANNUAL DATASET: V4 WF vs V3 WF vs SPY
+# NO MODEL RERUN REQUIRED
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import matplotlib.pyplot as plt
+import os
+
+DATE_PREFIX = "20260331"
+
+# ------------------------------------------------------------
+# 1. LOAD EXISTING ANNUAL RETURNS (V4 WF + SPY)
+# ------------------------------------------------------------
+
+BASE_DIR = os.getcwd()
+INPUT_FILE = "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/04_Backtesting/20260331_outputs/20260331_yearly_returns.csv"
+#os.path.join(BASE_DIR, f"{DATE_PREFIX}_yearly_returns.csv")
+
+df = pd.read_csv(INPUT_FILE, parse_dates=["timestamp"])
+df = df.set_index("timestamp")
+
+print("Loaded existing annual returns:")
+print(df.head())
+
+
+# ------------------------------------------------------------
+# 2. LOAD V3 WALKFORWARD SIGNALS
+# ------------------------------------------------------------
+
+V3_PATH = "/Workspace/Users/pawan.jatale@mubama.group/backup/Global-Dynamic-Factor-Rotation/Global Factors/notebooks/v3_walkforward_predictions.csv"
+
+v3 = pd.read_csv(
+    V3_PATH,
+    index_col=0,
+    parse_dates=True
+)["predicted_regime"]
+
+v3 = v3.sort_index()
+
+print("\nLoaded V3 signals:", len(v3))
+
+
+# ------------------------------------------------------------
+# 3. LOAD MARKET DATA
+# ------------------------------------------------------------
+
+prices = yf.download(
+    ["QQQ", "SPY"],
+    start="2021-01-01",
+    auto_adjust=True,
+    progress=False
+)["Close"]
+
+returns = prices.pct_change().dropna()
+
+print("Market data loaded:", returns.shape)
+
+
+# ------------------------------------------------------------
+# 4. ALIGN V3 TO DAILY FREQUENCY
+# ------------------------------------------------------------
+
+v3 = v3.resample("D").ffill()
+v3 = v3.reindex(returns.index, method="ffill")
+
+
+# ------------------------------------------------------------
+# 5. BUILD V3 WALKFORWARD RETURNS
+# ------------------------------------------------------------
+
+def get_asset(regime):
+    if regime == 0:
+        return "QQQ"
+    elif regime == 1:
+        return "SPY"
+    else:
+        return None
+
+ret_v3 = []
+
+for date, regime in v3.items():
+    asset = get_asset(regime)
+
+    if asset is None:
+        r = 0
+    else:
+        r = returns.loc[date, asset]
+
+    ret_v3.append(r)
+
+ret_v3 = pd.Series(ret_v3, index=v3.index)
+
+
+# ------------------------------------------------------------
+# 6. CONVERT TO ANNUAL RETURNS
+# ------------------------------------------------------------
+
+v3_annual = (
+    ret_v3
+    .resample("YE")
+    .apply(lambda x: (1 + x).prod() - 1)
+)
+
+v3_annual.name = "WalkForward_V3"
+
+print("\nV3 Annual Returns:")
+print(v3_annual)
+
+
+# ------------------------------------------------------------
+# 7. MERGE WITH EXISTING DATA
+# ------------------------------------------------------------
+
+df["WalkForward_V3"] = v3_annual
+
+# Keep only required columns for PPT
+final_df = df[["WalkForward_V4", "WalkForward_V3", "SPY"]]
+
+# Drop any incomplete rows (alignment safety)
+final_df = final_df.dropna()
+
+print("\nFinal dataset:")
+print(final_df)
+
+
+# ------------------------------------------------------------
+# 8. SAVE FINAL CSV
+# ------------------------------------------------------------
+
+OUTPUT_FILE = os.path.join(BASE_DIR, f"{DATE_PREFIX}_yearly_returns_FINAL.csv")
+
+final_df.reset_index().to_csv(OUTPUT_FILE, index=False)
+
+print(f"\n✅ FINAL FILE SAVED: {OUTPUT_FILE}")
+
+
+# ------------------------------------------------------------
+# 9. CREATE BAR CHART (SLIDE 7 READY)
+# ------------------------------------------------------------
+
+final_df.plot(kind="bar", figsize=(12,6))
+
+plt.title("Annual Returns: V4 WF vs V3 WF vs SPY")
+plt.ylabel("Return")
+plt.xlabel("Year")
+plt.grid(alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# COMMAND ----------
+
+# ============================================================
+# BUILD D/W/M/Y RETURNS FOR:
+# V4 WALKFORWARD vs V3 WALKFORWARD vs SPY
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import os
+
+DATE_PREFIX = "20260331"
+BASE_DIR = os.getcwd()
+
+# ------------------------------------------------------------
+# 1. LOAD V4 WALKFORWARD SIGNALS (DELTA)
+# ------------------------------------------------------------
+
+signals_df = spark.table(SIGNAL_TABLE).toPandas()
+signals_df["timestamp"] = pd.to_datetime(signals_df["timestamp"])
+signals_df = signals_df.sort_values("timestamp")
+
+v4 = signals_df.set_index("timestamp")["predicted_regime"]
+
+
+# ------------------------------------------------------------
+# 2. LOAD V3 WALKFORWARD SIGNALS
+# ------------------------------------------------------------
+
+V3_PATH = "/Workspace/Users/pawan.jatale@mubama.group/backup/Global-Dynamic-Factor-Rotation/Global Factors/notebooks/v3_walkforward_predictions.csv"
+
+v3 = pd.read_csv(
+    V3_PATH,
+    index_col=0,
+    parse_dates=True
+)["predicted_regime"]
+
+v3 = v3.sort_index()
+
+
+# ------------------------------------------------------------
+# 3. LOAD MARKET DATA
+# ------------------------------------------------------------
+
+prices = yf.download(
+    ["QQQ", "SPY"],
+    start="2021-01-01",
+    auto_adjust=True,
+    progress=False
+)["Close"]
+
+returns = prices.pct_change().dropna()
+
+
+# ------------------------------------------------------------
+# 4. ALIGN SIGNALS TO DAILY
+# ------------------------------------------------------------
+
+v4 = v4.resample("D").ffill().reindex(returns.index, method="ffill")
+v3 = v3.resample("D").ffill().reindex(returns.index, method="ffill")
+
+
+# ------------------------------------------------------------
+# 5. STRATEGY RETURN FUNCTION
+# ------------------------------------------------------------
+
+def get_asset(regime):
+    if regime == 0:
+        return "QQQ"
+    elif regime == 1:
+        return "SPY"
+    else:
+        return None
+
+def compute_strategy_returns(regime_series):
+    strat_returns = []
+
+    for date, regime in regime_series.items():
+        asset = get_asset(regime)
+
+        if asset is None:
+            r = 0
+        else:
+            r = returns.loc[date, asset]
+
+        strat_returns.append(r)
+
+    return pd.Series(strat_returns, index=regime_series.index)
+
+
+# ------------------------------------------------------------
+# 6. COMPUTE RETURNS
+# ------------------------------------------------------------
+
+ret_v4 = compute_strategy_returns(v4)
+ret_v3 = compute_strategy_returns(v3)
+ret_spy = returns["SPY"].reindex(ret_v4.index).fillna(0)
+
+strategy_returns = pd.DataFrame({
+    "WalkForward_V4": ret_v4,
+    "WalkForward_V3": ret_v3,
+    "SPY": ret_spy
+})
+
+
+# ------------------------------------------------------------
+# 7. AGGREGATE RETURNS
+# ------------------------------------------------------------
+
+daily_returns = strategy_returns.copy()
+
+weekly_returns = (
+    daily_returns
+    .resample("W-FRI")
+    .apply(lambda x: (1 + x).prod() - 1)
+)
+
+monthly_returns = (
+    daily_returns
+    .resample("ME")
+    .apply(lambda x: (1 + x).prod() - 1)
+)
+
+yearly_returns = (
+    daily_returns
+    .resample("YE")
+    .apply(lambda x: (1 + x).prod() - 1)
+)
+
+
+# ------------------------------------------------------------
+# 8. SAVE FILES
+# ------------------------------------------------------------
+
+daily_returns.to_csv(f"{BASE_DIR}/{DATE_PREFIX}_daily_returns_FINAL.csv")
+weekly_returns.to_csv(f"{BASE_DIR}/{DATE_PREFIX}_weekly_returns_FINAL.csv")
+monthly_returns.to_csv(f"{BASE_DIR}/{DATE_PREFIX}_monthly_returns_FINAL.csv")
+yearly_returns.to_csv(f"{BASE_DIR}/{DATE_PREFIX}_yearly_returns_FINAL_CHECK.csv")
+
+print("\n✅ ALL RETURNS FILES SAVED")
+print(BASE_DIR)
+
+
+# ------------------------------------------------------------
+# 9. QUICK PREVIEW
+# ------------------------------------------------------------
+
+print("\nYearly Returns Preview:")
+print(yearly_returns.tail())
+
+# COMMAND ----------
+
+# ============================================================
+# V4 WALK-FORWARD TRADE LOG
+# Assumes signals_df already exists from the walk-forward notebook
 # ============================================================
 
 import pandas as pd
 import numpy as np
 
-# ------------------------------------------------------------
-# STEP 1: Load V3 signals + merge prices
-# ------------------------------------------------------------
-
-v3_signals = pd.read_csv(
-    "/Workspace/Users/pawan.jatale@mubama.group/backup/Global-Dynamic-Factor-Rotation/Global Factors/notebooks/v3_walkforward_predictions.csv",
-    index_col=0,
-    parse_dates=True
-)[["predicted_regime"]].copy()
-
-v3_signals.index.name = "timestamp"
-v3_signals = v3_signals.reset_index()
-v3_signals["timestamp"] = pd.to_datetime(v3_signals["timestamp"])
-v3_signals = v3_signals.sort_values("timestamp").reset_index(drop=True)
-
-# V3 is weekly — resample to daily then forward-fill to hourly
-# to align with the same price grid used in the master comparison
-v3_signals = v3_signals.set_index("timestamp")
-v3_signals = v3_signals.resample("h").ffill()   # hourly forward-fill
-v3_signals = v3_signals.reset_index()
-
-print("V3 signal rows:", len(v3_signals))
-print("Range:", v3_signals.timestamp.min(), "→", v3_signals.timestamp.max())
+INITIAL_CAPITAL = 5_000_000
 
 # ------------------------------------------------------------
-# STEP 2: Load prices (reuse if already in session)
+# 1. PREP SIGNALS
 # ------------------------------------------------------------
-
-if "prices_pivot" not in dir():
-    prices_raw = spark.table(
-        "pawan_quant_research_1.default.bronze_bt_market_1h"
-    ).filter(
-        "symbol IN ('SPY','QQQ')"
-    ).toPandas()
-
-    prices_raw["timestamp"] = pd.to_datetime(prices_raw["timestamp"])
-
-    prices_pivot = prices_raw.pivot_table(
-        index="timestamp",
-        columns="symbol",
-        values="close",
-        aggfunc="last"
-    ).reset_index()
-
-# Merge prices onto V3 signals
-v3_trade_signals = v3_signals.merge(prices_pivot, on="timestamp", how="left")
-v3_trade_signals["SPY"] = v3_trade_signals["SPY"].ffill()
-v3_trade_signals["QQQ"] = v3_trade_signals["QQQ"].ffill()
-
-# Trim to live period only (match V4 start)
-v3_trade_signals = v3_trade_signals[
-    v3_trade_signals["timestamp"] >= "2021-01-01"
-].reset_index(drop=True)
-
-print("Columns:", v3_trade_signals.columns.tolist())
-print("Rows after trim:", len(v3_trade_signals))
-print(v3_trade_signals.head())
+trade_signals = signals_df[["timestamp", "predicted_regime"]].copy()
+trade_signals["timestamp"] = pd.to_datetime(trade_signals["timestamp"])
+trade_signals = trade_signals.sort_values("timestamp").reset_index(drop=True)
 
 # ------------------------------------------------------------
-# STEP 3: Build V3 trade log
+# 2. LOAD PRICES
 # ------------------------------------------------------------
+prices_raw = (
+    spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+    .filter("symbol IN ('SPY','QQQ')")
+    .toPandas()
+)
 
-trade_log_v3 = []
-active_asset  = "START"
-capital       = 5_000_000
+prices_raw["timestamp"] = pd.to_datetime(prices_raw["timestamp"])
 
-for i in range(1, len(v3_trade_signals)):
+prices_pivot = (
+    prices_raw
+    .pivot_table(index="timestamp", columns="symbol", values="close", aggfunc="last")
+    .reset_index()
+)
 
-    regime    = v3_trade_signals["predicted_regime"].iloc[i - 1]
-    timestamp = v3_trade_signals["timestamp"].iloc[i]
+trade_signals = trade_signals.merge(prices_pivot, on="timestamp", how="left")
+trade_signals["SPY"] = trade_signals["SPY"].ffill()
+trade_signals["QQQ"] = trade_signals["QQQ"].ffill()
+
+# ------------------------------------------------------------
+# 3. BUILD TRADE LOG
+# ------------------------------------------------------------
+trade_log = []
+active_asset = "START"
+capital = INITIAL_CAPITAL
+
+for i in range(1, len(trade_signals)):
+
+    ts = trade_signals.loc[i, "timestamp"]
+    regime = int(trade_signals.loc[i - 1, "predicted_regime"])
 
     if regime == 0:
         target = "QQQ"
@@ -1705,29 +2310,1891 @@ for i in range(1, len(v3_trade_signals)):
     else:
         target = "CASH"
 
-    price_now  = v3_trade_signals[target].iloc[i]   if target != "CASH" else None
-    price_prev = v3_trade_signals[target].iloc[i-1] if target != "CASH" else None
+    if target == "QQQ":
+        price_now = trade_signals.loc[i, "QQQ"]
+        price_prev = trade_signals.loc[i - 1, "QQQ"]
+        ret = price_now / price_prev - 1
+    elif target == "SPY":
+        price_now = trade_signals.loc[i, "SPY"]
+        price_prev = trade_signals.loc[i - 1, "SPY"]
+        ret = price_now / price_prev - 1
+    else:
+        price_now = np.nan
+        price_prev = np.nan
+        ret = 0.0
 
-    ret  = (price_now / price_prev - 1) if target != "CASH" else 0
-    cost = 0.0005 if target != active_asset else 0
+    tx_cost = 0.0005 if target != active_asset else 0.0
 
     if target != active_asset:
-        trade_log_v3.append({
-            "timestamp"       : timestamp,
-            "from_asset"      : active_asset,
-            "to_asset"        : target,
-            "regime"          : int(regime),
-            "price_entry"     : price_now,
-            "transaction_cost": cost,
-            "portfolio_value" : round(capital, 2)
+        trade_log.append({
+            "timestamp": ts,
+            "year": ts.year,
+            "month": ts.month,
+            "from_asset": active_asset,
+            "to_asset": target,
+            "regime": regime,
+            "price_entry": price_now,
+            "transaction_cost": tx_cost,
+            "portfolio_value_before_trade": round(capital, 2)
         })
 
-    capital      *= (1 + ret - cost)
-    active_asset  = target
+    capital *= (1 + ret - tx_cost)
+    active_asset = target
 
-v3_trades_df = pd.DataFrame(trade_log_v3)
-v3_trades_df["timestamp"] = pd.to_datetime(v3_trades_df["timestamp"])
+trades_df = pd.DataFrame(trade_log)
+trades_df["timestamp"] = pd.to_datetime(trades_df["timestamp"])
 
-print(f"\nTotal V3 WalkForward trades: {len(v3_trades_df)}")
-print(f"\nTrade breakdown:\n{v3_trades_df['to_asset'].value_counts()}")
-display(v3_trades_df)
+print(f"Total trades: {len(trades_df)}")
+display(trades_df.head(20))
+
+# Optional export
+EXPORT_PATH = "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/04_Backtesting/20260331_outputs"
+trades_df.to_csv(f"{EXPORT_PATH}/v4_walkforward_trade_log.csv", index=False)
+print(f"Saved: {EXPORT_PATH}/v4_walkforward_trade_log.csv")
+
+# COMMAND ----------
+
+# ============================================================
+# ANNUAL RETURNS TABLE + BAR CHART
+# WalkForward V4 vs WalkForward V3 vs SPY
+# LIMITED TO 2025 ONLY
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import matplotlib.pyplot as plt
+
+START_DATE = "2021-01-01"
+END_DATE   = "2026-03-31"
+
+# ------------------------------------------------------------
+# 1. LOAD V4 WALK-FORWARD SIGNALS
+# ------------------------------------------------------------
+v4 = signals_df.copy()
+v4["timestamp"] = pd.to_datetime(v4["timestamp"])
+v4 = v4.sort_values("timestamp")
+v4 = v4.set_index("timestamp")["predicted_regime"]
+
+# Trim V4 to 2025 end
+v4 = v4.loc[:END_DATE]
+
+# ------------------------------------------------------------
+# 2. LOAD V3 WALK-FORWARD SIGNALS
+# ------------------------------------------------------------
+V3_PATH = "/Workspace/Users/pawan.jatale@mubama.group/backup/Global-Dynamic-Factor-Rotation/Global Factors/notebooks/v3_walkforward_predictions.csv"
+
+v3 = pd.read_csv(
+    V3_PATH,
+    index_col=0,
+    parse_dates=True
+)["predicted_regime"].sort_index()
+
+# Trim V3 to 2025 end
+v3 = v3.loc[:END_DATE]
+
+# ------------------------------------------------------------
+# 3. LOAD DAILY MARKET DATA
+# ------------------------------------------------------------
+prices = yf.download(
+    ["QQQ", "SPY"],
+    start=START_DATE,
+    end="2026-01-01",   # yfinance end is exclusive
+    auto_adjust=True,
+    progress=False
+)["Close"]
+
+returns = prices.pct_change().dropna()
+
+# Extra safety trim
+returns = returns.loc[:END_DATE]
+
+# ------------------------------------------------------------
+# 4. ALIGN TO DAILY
+# ------------------------------------------------------------
+v4 = v4.resample("D").ffill().reindex(returns.index, method="ffill")
+v3 = v3.resample("D").ffill().reindex(returns.index, method="ffill")
+
+def get_asset(regime):
+    if regime == 0:
+        return "QQQ"
+    elif regime == 1:
+        return "SPY"
+    return None
+
+def compute_strategy_returns(regime_series):
+    out = []
+    for dt, regime in regime_series.items():
+        asset = get_asset(regime)
+        if asset is None or pd.isna(regime):
+            out.append(0.0)
+        else:
+            out.append(returns.loc[dt, asset])
+    return pd.Series(out, index=regime_series.index)
+
+ret_v4 = compute_strategy_returns(v4)
+ret_v3 = compute_strategy_returns(v3)
+ret_spy = returns["SPY"].reindex(ret_v4.index).fillna(0.0)
+
+daily_ret_df = pd.DataFrame({
+    "WalkForward_V4": ret_v4,
+    "WalkForward_V3": ret_v3,
+    "SPY": ret_spy
+})
+
+# Final safety trim
+daily_ret_df = daily_ret_df.loc[:END_DATE]
+
+# ------------------------------------------------------------
+# 5. YEARLY RETURNS
+# ------------------------------------------------------------
+yearly_returns = (
+    daily_ret_df
+    .resample("YE")
+    .apply(lambda x: (1 + x).prod() - 1)
+)
+
+yearly_returns.index = yearly_returns.index.year
+yearly_returns.index.name = "Year"
+
+# Keep only 2021–2025
+yearly_returns = yearly_returns.loc[2021:2025]
+
+print("Annual returns table (through 2025 only):")
+display((yearly_returns * 100).round(2))
+
+# Optional export
+EXPORT_PATH = "/Volumes/pawan_quant_research_1/default/market_data"
+yearly_returns.to_csv(f"{EXPORT_PATH}/yearly_returns_v4_v3_spy_till_2025.csv")
+print(f"Saved: {EXPORT_PATH}/yearly_returns_v4_v3_spy_till_2025.csv")
+
+# ------------------------------------------------------------
+# 6. PRESENTATION-READY BAR CHART
+# ------------------------------------------------------------
+plot_df = (yearly_returns * 100).copy()
+
+ax = plot_df.plot(
+    kind="bar",
+    figsize=(12, 6),
+    width=0.8
+)
+
+plt.title("Annual Returns: Walk-Forward V4 vs Walk-Forward V3 vs SPY (2021–2025)", fontsize=14)
+plt.ylabel("Return (%)")
+plt.xlabel("Year")
+plt.axhline(0, color="black", linewidth=1)
+plt.grid(axis="y", alpha=0.3)
+plt.legend(title="Strategy")
+plt.tight_layout()
+plt.show()
+
+# COMMAND ----------
+
+# ============================================================
+# REGIME CASE-STUDY CHARTS
+# WalkForward V4 vs SPY with regime strip
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+INITIAL_CAPITAL = 5_000_000
+
+# ------------------------------------------------------------
+# 1. BUILD WALK-FORWARD EQUITY SERIES
+# ------------------------------------------------------------
+case_df = signals_df.copy()
+case_df["timestamp"] = pd.to_datetime(case_df["timestamp"])
+case_df = case_df.sort_values("timestamp")
+
+prices_raw = (
+    spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+    .filter("symbol IN ('SPY','QQQ')")
+    .toPandas()
+)
+
+prices_raw["timestamp"] = pd.to_datetime(prices_raw["timestamp"])
+
+prices_pivot = (
+    prices_raw
+    .pivot_table(index="timestamp", columns="symbol", values="close", aggfunc="last")
+    .reset_index()
+)
+
+case_df = case_df.merge(prices_pivot, on="timestamp", how="left")
+case_df["SPY"] = case_df["SPY"].ffill()
+case_df["QQQ"] = case_df["QQQ"].ffill()
+
+portfolio = [INITIAL_CAPITAL]
+active_asset = "START"
+
+for i in range(1, len(case_df)):
+    regime = int(case_df.loc[i - 1, "predicted_regime"])
+
+    if regime == 0:
+        target = "QQQ"
+        ret = case_df.loc[i, "QQQ"] / case_df.loc[i - 1, "QQQ"] - 1
+    elif regime == 1:
+        target = "SPY"
+        ret = case_df.loc[i, "SPY"] / case_df.loc[i - 1, "SPY"] - 1
+    else:
+        target = "CASH"
+        ret = 0.0
+
+    tx_cost = 0.0005 if target != active_asset else 0.0
+    portfolio.append(portfolio[-1] * (1 + ret - tx_cost))
+    active_asset = target
+
+case_df["WF_Value"] = portfolio
+case_df["SPY_Value"] = INITIAL_CAPITAL * (case_df["SPY"] / case_df["SPY"].iloc[0])
+
+# ------------------------------------------------------------
+# 2. REUSABLE PLOT FUNCTION
+# ------------------------------------------------------------
+def plot_regime_case_study(df, start_date, end_date, title):
+    zoom = df[(df["timestamp"] >= pd.Timestamp(start_date)) & (df["timestamp"] <= pd.Timestamp(end_date))].copy()
+
+    if zoom.empty:
+        print(f"No data for {title}")
+        return
+
+    # Normalize both to 100 at window start
+    zoom["WF_Norm"] = 100 * zoom["WF_Value"] / zoom["WF_Value"].iloc[0]
+    zoom["SPY_Norm"] = 100 * zoom["SPY_Value"] / zoom["SPY_Value"].iloc[0]
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(15, 8),
+        gridspec_kw={"height_ratios": [3, 1]},
+        sharex=True
+    )
+
+    ax1.plot(zoom["timestamp"], zoom["WF_Norm"], label="Walk-Forward V4", linewidth=2)
+    ax1.plot(zoom["timestamp"], zoom["SPY_Norm"], label="SPY", linewidth=2, alpha=0.75)
+    ax1.set_title(title, fontsize=14)
+    ax1.set_ylabel("Normalized Value (Start = 100)")
+    ax1.grid(alpha=0.3)
+    ax1.legend()
+
+    ts = zoom["timestamp"]
+    reg = zoom["predicted_regime"]
+
+    ax2.fill_between(ts, 0, 1, where=(reg == 0), alpha=0.35, label="Expansion / QQQ")
+    ax2.fill_between(ts, 0, 1, where=(reg == 1), alpha=0.35, label="Normalization / SPY")
+    ax2.fill_between(ts, 0, 1, where=(reg == 2), alpha=0.35, label="Contraction / Cash")
+
+    ax2.set_yticks([])
+    ax2.set_ylabel("Regime")
+    ax2.legend(loc="upper left", ncol=3)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+
+# ------------------------------------------------------------
+# 3. CASE STUDIES
+# ------------------------------------------------------------
+
+# 2022 bear / hiking regime
+plot_regime_case_study(
+    case_df,
+    start_date="2022-01-01",
+    end_date="2022-12-31",
+    title="Case Study 1: 2022 Rate-Hike / Bear Market Regime"
+)
+
+# Apr-2025 tariffs window
+plot_regime_case_study(
+    case_df,
+    start_date="2025-04-01",
+    end_date="2025-04-30",
+    title="Case Study 2: April 2025 Tariff Shock Window"
+)
+
+# Feb-2025 to present
+plot_regime_case_study(
+    case_df,
+    start_date="2026-02-25",
+    end_date=case_df["timestamp"].max(),
+    title="Case Study 3: Feb 2026 to Present"
+)
+
+# COMMAND ----------
+
+# ============================================================
+# V4 WALK-FORWARD PERFORMANCE METRICS
+# CAGR = calendar-day geometric return
+# VOL / SHARPE / SORTINO = daily return based
+# WINDOW: 2021-01-01 to 2025-12-31
+# ============================================================
+
+import pandas as pd
+import numpy as np
+
+START_DATE = "2021-01-01"
+END_DATE   = "2025-12-31"
+INITIAL_CAPITAL = 5_000_000
+TRADING_DAYS = 252
+CALENDAR_DAYS_PER_YEAR = 365.25
+RISK_FREE_RATE = 0.0   # set to non-zero if needed
+
+# ------------------------------------------------------------
+# 1. PREP SIGNALS
+# ------------------------------------------------------------
+wf = signals_df.copy()
+wf["timestamp"] = pd.to_datetime(wf["timestamp"])
+wf = wf.sort_values("timestamp")
+wf = wf[(wf["timestamp"] >= START_DATE) & (wf["timestamp"] <= END_DATE)].copy()
+
+# ------------------------------------------------------------
+# 2. LOAD PRICES
+# ------------------------------------------------------------
+prices = (
+    spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+    .filter("symbol IN ('SPY','QQQ')")
+    .toPandas()
+)
+
+prices["timestamp"] = pd.to_datetime(prices["timestamp"])
+
+prices = prices.pivot_table(
+    index="timestamp",
+    columns="symbol",
+    values="close",
+    aggfunc="last"
+).reset_index()
+
+prices = prices[
+    (prices["timestamp"] >= START_DATE) &
+    (prices["timestamp"] <= END_DATE)
+].copy()
+
+# ------------------------------------------------------------
+# 3. MERGE SIGNALS + PRICES
+# ------------------------------------------------------------
+wf = wf.merge(prices, on="timestamp", how="left")
+wf["SPY"] = wf["SPY"].ffill()
+wf["QQQ"] = wf["QQQ"].ffill()
+wf = wf.dropna(subset=["SPY", "QQQ"]).reset_index(drop=True)
+
+# ------------------------------------------------------------
+# 4. BUILD WALK-FORWARD PORTFOLIO (hourly logic)
+# ------------------------------------------------------------
+capital = INITIAL_CAPITAL
+portfolio = [capital]
+active_asset = "START"
+
+for i in range(1, len(wf)):
+
+    regime = int(wf["predicted_regime"].iloc[i - 1])
+
+    if regime == 0:
+        target = "QQQ"
+        ret = wf["QQQ"].iloc[i] / wf["QQQ"].iloc[i - 1] - 1
+
+    elif regime == 1:
+        target = "SPY"
+        ret = wf["SPY"].iloc[i] / wf["SPY"].iloc[i - 1] - 1
+
+    else:
+        target = "CASH"
+        ret = 0.0
+
+    cost = 0.0005 if target != active_asset else 0.0
+
+    capital *= (1 + ret - cost)
+    portfolio.append(capital)
+    active_asset = target
+
+wf["WF_Value"] = portfolio
+wf["SPY_Value"] = INITIAL_CAPITAL * (wf["SPY"] / wf["SPY"].iloc[0])
+
+wf = wf.set_index("timestamp")
+
+# ------------------------------------------------------------
+# 5. DAILY NAV
+# ------------------------------------------------------------
+daily_nav = wf[["WF_Value", "SPY_Value"]].resample("D").last().dropna()
+
+# ------------------------------------------------------------
+# 6. METRICS FUNCTION
+# ------------------------------------------------------------
+def compute_metrics_from_daily_nav(series: pd.Series) -> pd.Series:
+    daily_ret = series.pct_change(fill_method=None).dropna()
+
+    start_val = float(series.iloc[0])
+    end_val   = float(series.iloc[-1])
+
+    total_return = end_val / start_val - 1
+
+    calendar_days = (series.index[-1] - series.index[0]).days
+    years = calendar_days / CALENDAR_DAYS_PER_YEAR if calendar_days > 0 else np.nan
+
+    # CAGR = geometric, calendar-based
+    cagr = (end_val / start_val) ** (1 / years) - 1 if pd.notna(years) and years > 0 else np.nan
+
+    # Daily-vol annualized
+    vol = daily_ret.std() * np.sqrt(TRADING_DAYS)
+
+    # Daily Sharpe annualized
+    ann_mean_excess = (daily_ret.mean() - RISK_FREE_RATE / TRADING_DAYS) * TRADING_DAYS
+    sharpe = ann_mean_excess / vol if pd.notna(vol) and vol != 0 else np.nan
+
+    downside = daily_ret[daily_ret < 0]
+    downside_vol = downside.std() * np.sqrt(TRADING_DAYS) if len(downside) > 0 else np.nan
+    sortino = ann_mean_excess / downside_vol if pd.notna(downside_vol) and downside_vol != 0 else np.nan
+
+    dd = series / series.cummax() - 1
+    max_dd = dd.min()
+
+    # sanity ratio for debugging only
+    cagr_over_vol = cagr / vol if pd.notna(vol) and vol != 0 else np.nan
+
+    return pd.Series({
+        "Start Date": series.index[0].date(),
+        "End Date": series.index[-1].date(),
+        "Calendar Days": calendar_days,
+        "Start Value": start_val,
+        "Final Value": end_val,
+        "Total Return": total_return,
+        "CAGR": cagr,
+        "Annual Volatility": vol,
+        "Sharpe": sharpe,
+        "Sortino": sortino,
+        "Max Drawdown": max_dd,
+        "CAGR / Vol (sanity check)": cagr_over_vol
+    })
+
+metrics_df = pd.DataFrame({
+    "V4 WalkForward": compute_metrics_from_daily_nav(daily_nav["WF_Value"]),
+    "SPY Benchmark": compute_metrics_from_daily_nav(daily_nav["SPY_Value"])
+}).T
+
+display(metrics_df)
+
+# ------------------------------------------------------------
+# 7. FORMATTED VERSION
+# ------------------------------------------------------------
+metrics_fmt = metrics_df.copy()
+
+metrics_fmt["Start Value"] = metrics_fmt["Start Value"].map(lambda x: f"{x:,.0f}")
+metrics_fmt["Final Value"] = metrics_fmt["Final Value"].map(lambda x: f"{x:,.0f}")
+metrics_fmt["Total Return"] = metrics_fmt["Total Return"].map(lambda x: f"{x*100:.2f}%")
+metrics_fmt["CAGR"] = metrics_fmt["CAGR"].map(lambda x: f"{x*100:.2f}%")
+metrics_fmt["Annual Volatility"] = metrics_fmt["Annual Volatility"].map(lambda x: f"{x*100:.2f}%")
+metrics_fmt["Sharpe"] = metrics_fmt["Sharpe"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "NA")
+metrics_fmt["Sortino"] = metrics_fmt["Sortino"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "NA")
+metrics_fmt["Max Drawdown"] = metrics_fmt["Max Drawdown"].map(lambda x: f"{x*100:.2f}%")
+metrics_fmt["CAGR / Vol (sanity check)"] = metrics_fmt["CAGR / Vol (sanity check)"].map(
+    lambda x: f"{x:.2f}" if pd.notna(x) else "NA"
+)
+
+display(metrics_fmt)
+
+# COMMAND ----------
+
+# ============================================================
+# LOAD WALK-FORWARD SIGNALS WITHOUT RERUNNING MODEL
+# ============================================================
+
+import pandas as pd
+
+# OPTION A — preferred: Delta table written by notebook
+SIGNAL_TABLE = "pawan_quant_research_1.default.bt_walkforward_regime_signals"
+
+signals_df = spark.table(SIGNAL_TABLE).toPandas()
+signals_df["timestamp"] = pd.to_datetime(signals_df["timestamp"])
+signals_df = signals_df.sort_values("timestamp").reset_index(drop=True)
+
+print("Loaded signals from Delta table")
+print("Rows:", len(signals_df))
+print("Range:", signals_df["timestamp"].min(), "->", signals_df["timestamp"].max())
+display(signals_df.head())
+
+# COMMAND ----------
+
+# ============================================================
+# V4 WALK-FORWARD WITH 5X LEVERAGE DURING EXPANSION ONLY
+# Expansion   -> 5x QQQ
+# Slowdown    -> 1x SPY
+# Contraction -> CASH
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+START_DATE = "2021-01-01"
+END_DATE   = "2025-12-31"
+
+INITIAL_CAPITAL = 5_000_000
+SWITCH_COST     = 0.0005
+EXPANSION_LEV   = 5.0
+
+TRADING_DAYS = 252
+CAL_DAYS     = 365.25
+
+# ------------------------------------------------------------
+# 1. PREP SIGNALS
+# ------------------------------------------------------------
+wf_df = signals_df.copy()
+wf_df["timestamp"] = pd.to_datetime(wf_df["timestamp"])
+wf_df = wf_df.sort_values("timestamp")
+wf_df = wf_df[
+    (wf_df["timestamp"] >= START_DATE) &
+    (wf_df["timestamp"] <= END_DATE)
+].copy()
+
+# ------------------------------------------------------------
+# 2. LOAD SPY / QQQ PRICES
+# ------------------------------------------------------------
+prices = (
+    spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+    .filter("symbol IN ('SPY','QQQ')")
+    .toPandas()
+)
+
+prices["timestamp"] = pd.to_datetime(prices["timestamp"])
+
+prices = prices.pivot_table(
+    index="timestamp",
+    columns="symbol",
+    values="close",
+    aggfunc="last"
+).reset_index()
+
+prices = prices[
+    (prices["timestamp"] >= START_DATE) &
+    (prices["timestamp"] <= END_DATE)
+].copy()
+
+# ------------------------------------------------------------
+# 3. MERGE
+# ------------------------------------------------------------
+wf_df = wf_df.merge(prices, on="timestamp", how="left")
+wf_df["SPY"] = wf_df["SPY"].ffill()
+wf_df["QQQ"] = wf_df["QQQ"].ffill()
+wf_df = wf_df.dropna(subset=["SPY", "QQQ"]).reset_index(drop=True)
+
+print("Rows:", len(wf_df))
+print("Window:", wf_df["timestamp"].min(), "->", wf_df["timestamp"].max())
+
+# ------------------------------------------------------------
+# 4. BASELINE WALK-FORWARD
+# ------------------------------------------------------------
+def run_wf_baseline(df):
+    capital = INITIAL_CAPITAL
+    portfolio = [capital]
+    active_asset = "START"
+
+    for i in range(1, len(df)):
+        regime = int(df.loc[i - 1, "predicted_regime"])
+
+        if regime == 0:
+            target = "QQQ"
+            ret = df.loc[i, "QQQ"] / df.loc[i - 1, "QQQ"] - 1
+
+        elif regime == 1:
+            target = "SPY"
+            ret = df.loc[i, "SPY"] / df.loc[i - 1, "SPY"] - 1
+
+        else:
+            target = "CASH"
+            ret = 0.0
+
+        cost = SWITCH_COST if target != active_asset else 0.0
+        capital *= (1 + ret - cost)
+
+        portfolio.append(capital)
+        active_asset = target
+
+    return portfolio
+
+# ------------------------------------------------------------
+# 5. 5X LEVERAGE DURING EXPANSION ONLY
+# ------------------------------------------------------------
+def run_wf_expansion_5x(df):
+    capital = INITIAL_CAPITAL
+    portfolio = [capital]
+    active_asset = "START"
+
+    for i in range(1, len(df)):
+        regime = int(df.loc[i - 1, "predicted_regime"])
+
+        # Expansion -> 5x QQQ
+        if regime == 0:
+            target = "QQQ_5X"
+            raw_ret = df.loc[i, "QQQ"] / df.loc[i - 1, "QQQ"] - 1
+            ret = EXPANSION_LEV * raw_ret
+
+        # Slowdown -> 1x SPY
+        elif regime == 1:
+            target = "SPY"
+            ret = df.loc[i, "SPY"] / df.loc[i - 1, "SPY"] - 1
+
+        # Contraction -> CASH
+        else:
+            target = "CASH"
+            ret = 0.0
+
+        cost = SWITCH_COST if target != active_asset else 0.0
+        capital *= (1 + ret - cost)
+
+        portfolio.append(capital)
+        active_asset = target
+
+    return portfolio
+
+# ------------------------------------------------------------
+# 6. BUILD EQUITY CURVES
+# ------------------------------------------------------------
+wf_df["WF_Base"] = run_wf_baseline(wf_df)
+wf_df["WF_Expansion_5x"] = run_wf_expansion_5x(wf_df)
+wf_df["SPY_Value"] = INITIAL_CAPITAL * (wf_df["SPY"] / wf_df["SPY"].iloc[0])
+
+# ------------------------------------------------------------
+# 7. METRICS
+# CAGR = calendar days
+# VOL / SHARPE / SORTINO = daily returns
+# ------------------------------------------------------------
+def compute_metrics_from_daily_nav(series: pd.Series) -> pd.Series:
+    daily_nav = series.resample("D").last().dropna()
+    daily_ret = daily_nav.pct_change(fill_method=None).dropna()
+
+    start_val = float(daily_nav.iloc[0])
+    end_val   = float(daily_nav.iloc[-1])
+
+    total_return = end_val / start_val - 1
+    cal_days = (daily_nav.index[-1] - daily_nav.index[0]).days
+    years = cal_days / CAL_DAYS if cal_days > 0 else np.nan
+
+    cagr = (end_val / start_val) ** (1 / years) - 1 if pd.notna(years) and years > 0 else np.nan
+    vol = daily_ret.std() * np.sqrt(TRADING_DAYS)
+
+    sharpe = (
+        daily_ret.mean() / daily_ret.std() * np.sqrt(TRADING_DAYS)
+        if daily_ret.std() != 0 else np.nan
+    )
+
+    downside = daily_ret[daily_ret < 0]
+    downside_std = downside.std()
+    sortino = (
+        daily_ret.mean() / downside_std * np.sqrt(TRADING_DAYS)
+        if pd.notna(downside_std) and downside_std != 0 else np.nan
+    )
+
+    dd = daily_nav / daily_nav.cummax() - 1
+    max_dd = dd.min()
+
+    return pd.Series({
+        "Start Value": start_val,
+        "Final Value": end_val,
+        "Total Return": total_return,
+        "CAGR": cagr,
+        "Annual Volatility": vol,
+        "Sharpe": sharpe,
+        "Sortino": sortino,
+        "Max Drawdown": max_dd
+    })
+
+nav_df = wf_df.set_index("timestamp")[["WF_Base", "WF_Expansion_5x", "SPY_Value"]]
+
+metrics = pd.DataFrame({
+    "V4 WalkForward": compute_metrics_from_daily_nav(nav_df["WF_Base"]),
+    "V4 Expansion 5x": compute_metrics_from_daily_nav(nav_df["WF_Expansion_5x"]),
+    "SPY": compute_metrics_from_daily_nav(nav_df["SPY_Value"])
+}).T
+
+print("\nRaw metrics")
+display(metrics)
+
+metrics_fmt = metrics.copy()
+metrics_fmt["Start Value"] = metrics_fmt["Start Value"].map(lambda x: f"{x:,.0f}")
+metrics_fmt["Final Value"] = metrics_fmt["Final Value"].map(lambda x: f"{x:,.0f}")
+for c in ["Total Return", "CAGR", "Annual Volatility", "Max Drawdown"]:
+    metrics_fmt[c] = metrics_fmt[c].map(lambda x: f"{x*100:.2f}%")
+for c in ["Sharpe", "Sortino"]:
+    metrics_fmt[c] = metrics_fmt[c].map(lambda x: f"{x:.2f}" if pd.notna(x) else "NA")
+
+print("\nFormatted metrics")
+display(metrics_fmt)
+
+# ------------------------------------------------------------
+# 8. PLOT
+# ------------------------------------------------------------
+plt.figure(figsize=(16, 7))
+
+plt.plot(nav_df.index, nav_df["WF_Base"], label="V4 WalkForward", linewidth=1.8)
+plt.plot(nav_df.index, nav_df["WF_Expansion_5x"], label="V4 Expansion 5x", linewidth=1.8)
+plt.plot(nav_df.index, nav_df["SPY_Value"], label="SPY", linewidth=1.5, alpha=0.8)
+
+plt.yscale("log")
+plt.title("V4 WalkForward vs Expansion-Only 5x vs SPY")
+plt.ylabel("Portfolio Value")
+plt.grid(alpha=0.3)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------------------
+# 9. OPTIONAL EXPORT
+# ------------------------------------------------------------
+EXPORT_PATH = "/Volumes/pawan_quant_research_1/default/market_data"
+
+nav_df.to_csv(f"{EXPORT_PATH}/v4_expansion_5x_nav.csv")
+metrics.to_csv(f"{EXPORT_PATH}/v4_expansion_5x_metrics.csv")
+
+print(f"Saved: {EXPORT_PATH}/v4_expansion_5x_nav.csv")
+print(f"Saved: {EXPORT_PATH}/v4_expansion_5x_metrics.csv")
+
+# COMMAND ----------
+
+# ============================================================
+# LEVERAGE OPTIMIZATION SWEEP
+# Expansion leverage only
+# Slowdown = 1x SPY
+# Contraction = CASH
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+START_DATE = "2021-01-01"
+END_DATE   = "2025-12-31"
+
+INITIAL_CAPITAL = 5_000_000
+SWITCH_COST = 0.0005
+TRADING_DAYS = 252
+CAL_DAYS = 365.25
+
+LEVERAGE_GRID = [1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
+
+# ------------------------------------------------------------
+# 1. LOAD SIGNALS (NO MODEL RERUN)
+# ------------------------------------------------------------
+SIGNAL_TABLE = "pawan_quant_research_1.default.bt_walkforward_regime_signals"
+
+wf_df = spark.table(SIGNAL_TABLE).toPandas()
+wf_df["timestamp"] = pd.to_datetime(wf_df["timestamp"], utc=True).dt.tz_localize(None)
+wf_df = wf_df.sort_values("timestamp")
+wf_df = wf_df[
+    (wf_df["timestamp"] >= START_DATE) &
+    (wf_df["timestamp"] <= END_DATE)
+].copy()
+
+# ------------------------------------------------------------
+# 2. LOAD PRICES
+# ------------------------------------------------------------
+prices = (
+    spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+    .filter("symbol IN ('SPY','QQQ')")
+    .toPandas()
+)
+
+prices["timestamp"] = pd.to_datetime(prices["timestamp"])
+if str(prices["timestamp"].dtype).startswith("datetime64[ns,"):
+    prices["timestamp"] = prices["timestamp"].dt.tz_localize(None)
+
+prices = (
+    prices.pivot_table(
+        index="timestamp",
+        columns="symbol",
+        values="close",
+        aggfunc="last"
+    )
+    .reset_index()
+)
+
+prices = prices[
+    (prices["timestamp"] >= START_DATE) &
+    (prices["timestamp"] <= END_DATE)
+].copy()
+
+# ------------------------------------------------------------
+# 3. MERGE
+# ------------------------------------------------------------
+wf_df = wf_df.merge(prices, on="timestamp", how="left")
+wf_df["SPY"] = wf_df["SPY"].ffill()
+wf_df["QQQ"] = wf_df["QQQ"].ffill()
+wf_df = wf_df.dropna(subset=["SPY", "QQQ"]).reset_index(drop=True)
+
+# ------------------------------------------------------------
+# 4. STRATEGY RUNNER
+# ------------------------------------------------------------
+def run_expansion_leverage(df, expansion_lev=1.0):
+    capital = INITIAL_CAPITAL
+    portfolio = [capital]
+    active_asset = "START"
+
+    for i in range(1, len(df)):
+        regime = int(df.loc[i - 1, "predicted_regime"])
+
+        if regime == 0:
+            target = f"QQQ_{expansion_lev}x"
+            raw_ret = df.loc[i, "QQQ"] / df.loc[i - 1, "QQQ"] - 1
+            ret = expansion_lev * raw_ret
+
+        elif regime == 1:
+            target = "SPY"
+            ret = df.loc[i, "SPY"] / df.loc[i - 1, "SPY"] - 1
+
+        else:
+            target = "CASH"
+            ret = 0.0
+
+        cost = SWITCH_COST if target != active_asset else 0.0
+        capital *= (1 + ret - cost)
+        portfolio.append(capital)
+        active_asset = target
+
+    return pd.Series(portfolio, index=df["timestamp"])
+
+# ------------------------------------------------------------
+# 5. METRICS
+# CAGR = calendar days
+# VOL/SHARPE/SORTINO = daily-return based
+# ------------------------------------------------------------
+def compute_metrics_from_nav(nav: pd.Series):
+    daily_nav = nav.resample("D").last().dropna()
+    daily_ret = daily_nav.pct_change(fill_method=None).dropna()
+
+    start_val = float(daily_nav.iloc[0])
+    end_val = float(daily_nav.iloc[-1])
+
+    total_return = end_val / start_val - 1
+    cal_days = (daily_nav.index[-1] - daily_nav.index[0]).days
+    years = cal_days / CAL_DAYS if cal_days > 0 else np.nan
+
+    cagr = (end_val / start_val) ** (1 / years) - 1 if pd.notna(years) and years > 0 else np.nan
+    vol = daily_ret.std() * np.sqrt(TRADING_DAYS)
+
+    sharpe = (
+        daily_ret.mean() / daily_ret.std() * np.sqrt(TRADING_DAYS)
+        if daily_ret.std() != 0 else np.nan
+    )
+
+    downside = daily_ret[daily_ret < 0]
+    downside_std = downside.std()
+    sortino = (
+        daily_ret.mean() / downside_std * np.sqrt(TRADING_DAYS)
+        if pd.notna(downside_std) and downside_std != 0 else np.nan
+    )
+
+    dd = daily_nav / daily_nav.cummax() - 1
+    max_dd = dd.min()
+
+    calmar = cagr / abs(max_dd) if pd.notna(max_dd) and max_dd != 0 else np.nan
+
+    return {
+        "Start Value": start_val,
+        "Final Value": end_val,
+        "Total Return": total_return,
+        "CAGR": cagr,
+        "Annual Volatility": vol,
+        "Sharpe": sharpe,
+        "Sortino": sortino,
+        "Max Drawdown": max_dd,
+        "Calmar": calmar
+    }
+
+# ------------------------------------------------------------
+# 6. RUN GRID
+# ------------------------------------------------------------
+navs = {}
+rows = []
+
+for lev in LEVERAGE_GRID:
+    nav = run_expansion_leverage(wf_df, expansion_lev=lev)
+    navs[lev] = nav
+
+    m = compute_metrics_from_nav(nav)
+    m["Expansion Leverage"] = lev
+    rows.append(m)
+
+# SPY benchmark
+spy_nav = INITIAL_CAPITAL * (
+    wf_df.set_index("timestamp")["SPY"] / wf_df["SPY"].iloc[0]
+)
+spy_metrics = compute_metrics_from_nav(spy_nav)
+spy_metrics["Expansion Leverage"] = "SPY"
+rows.append(spy_metrics)
+
+results = pd.DataFrame(rows)
+
+# ------------------------------------------------------------
+# 7. SORT / REVIEW
+# ------------------------------------------------------------
+results = results[
+    ["Expansion Leverage", "Final Value", "Total Return", "CAGR",
+     "Annual Volatility", "Sharpe", "Sortino", "Max Drawdown", "Calmar"]
+]
+
+print("Raw leverage sweep results")
+display(results.sort_values("Sharpe", ascending=False))
+
+# ------------------------------------------------------------
+# 8. FORMAT
+# ------------------------------------------------------------
+results_fmt = results.copy()
+
+results_fmt["Final Value"] = results_fmt["Final Value"].apply(
+    lambda x: f"{x:,.0f}" if pd.notna(x) and not isinstance(x, str) else x
+)
+
+for col in ["Total Return", "CAGR", "Annual Volatility", "Max Drawdown"]:
+    results_fmt[col] = results_fmt[col].apply(
+        lambda x: f"{x*100:.2f}%" if pd.notna(x) and not isinstance(x, str) else x
+    )
+
+for col in ["Sharpe", "Sortino", "Calmar"]:
+    results_fmt[col] = results_fmt[col].apply(
+        lambda x: f"{x:.2f}" if pd.notna(x) and not isinstance(x, str) else x
+    )
+
+print("Formatted leverage sweep results")
+display(results_fmt.sort_values("Sharpe", ascending=False))
+
+# ------------------------------------------------------------
+# 9. PLOT EFFICIENT FRONTIER STYLE
+# ------------------------------------------------------------
+plot_df = results[results["Expansion Leverage"] != "SPY"].copy()
+plot_df["Expansion Leverage"] = plot_df["Expansion Leverage"].astype(float)
+
+plt.figure(figsize=(12, 7))
+plt.scatter(plot_df["Annual Volatility"], plot_df["CAGR"], s=80)
+
+for _, row in plot_df.iterrows():
+    plt.annotate(
+        f"{row['Expansion Leverage']}x",
+        (row["Annual Volatility"], row["CAGR"]),
+        xytext=(5, 5),
+        textcoords="offset points"
+    )
+
+# SPY marker
+plt.scatter(
+    results.loc[results["Expansion Leverage"] == "SPY", "Annual Volatility"],
+    results.loc[results["Expansion Leverage"] == "SPY", "CAGR"],
+    s=120,
+    marker="X"
+)
+
+plt.xlabel("Annual Volatility")
+plt.ylabel("CAGR")
+plt.title("Expansion-Leverage Frontier: CAGR vs Volatility")
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------------------
+# 10. OPTIONAL FILTER: ACCEPTABLE DRAWDOWN
+# ------------------------------------------------------------
+dd_cap = -0.35
+
+acceptable = results[
+    (results["Expansion Leverage"] != "SPY") &
+    (results["Max Drawdown"] >= dd_cap)
+].copy()
+
+print(f"Strategies with Max Drawdown >= {dd_cap:.0%}")
+display(acceptable.sort_values("Calmar", ascending=False))
+
+# COMMAND ----------
+
+# DBTITLE 1,Leverage Sweep WITH Borrowing Cost (10yr UST + 50bps)
+# ============================================================
+# LEVERAGE SWEEP — WITH COST OF LEVERAGE
+# Borrow rate = avg 10-year US Treasury yield (per year) + 50 bps
+# Sourced from yfinance (^TNX)
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import matplotlib.pyplot as plt
+
+START_DATE = "2021-01-01"
+END_DATE   = "2025-12-31"
+
+INITIAL_CAPITAL = 5_000_000
+SWITCH_COST     = 0.0005
+SPREAD_BPS      = 0.0050          # 50 bps over 10yr
+TRADING_DAYS    = 252
+CAL_DAYS        = 365.25
+
+LEVERAGE_GRID = [1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
+
+# ── 1. DOWNLOAD 10-YEAR TREASURY YIELD ───────────────────────
+tnx = yf.download("^TNX", start="2021-01-01", end="2026-01-01", progress=False)
+tnx_close = tnx["Close"].dropna()
+if isinstance(tnx_close, pd.DataFrame):
+    tnx_close = tnx_close.squeeze()
+
+# Average annual yield (^TNX is in %, e.g. 4.25 = 4.25%)
+avg_yield_by_year = tnx_close.groupby(tnx_close.index.year).mean() / 100  # decimal
+borrow_rate_by_year = avg_yield_by_year + SPREAD_BPS
+
+print("Average 10yr UST yield + 50bps (borrow rate):")
+for yr, rate in borrow_rate_by_year.items():
+    print(f"  {yr}: {avg_yield_by_year[yr]*100:.2f}% + 50bps = {rate*100:.2f}%")
+
+# ── 2. LOAD SIGNALS + PRICES (reuse from cell 55) ───────────
+SIGNAL_TABLE = "pawan_quant_research_1.default.bt_walkforward_regime_signals"
+
+wf_df = spark.table(SIGNAL_TABLE).toPandas()
+wf_df["timestamp"] = pd.to_datetime(wf_df["timestamp"])
+if str(wf_df["timestamp"].dtype).startswith("datetime64[ns,"):
+    wf_df["timestamp"] = wf_df["timestamp"].dt.tz_localize(None)
+wf_df = wf_df.sort_values("timestamp")
+wf_df = wf_df[
+    (wf_df["timestamp"] >= START_DATE) &
+    (wf_df["timestamp"] <= END_DATE)
+].copy()
+
+prices = (
+    spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+    .filter("symbol IN ('SPY','QQQ')")
+    .toPandas()
+)
+prices["timestamp"] = pd.to_datetime(prices["timestamp"])
+if str(prices["timestamp"].dtype).startswith("datetime64[ns,"):
+    prices["timestamp"] = prices["timestamp"].dt.tz_localize(None)
+prices = (
+    prices.pivot_table(index="timestamp", columns="symbol",
+                       values="close", aggfunc="last")
+    .reset_index()
+)
+prices = prices[
+    (prices["timestamp"] >= START_DATE) &
+    (prices["timestamp"] <= END_DATE)
+].copy()
+
+wf_df = wf_df.merge(prices, on="timestamp", how="left")
+wf_df["SPY"] = wf_df["SPY"].ffill()
+wf_df["QQQ"] = wf_df["QQQ"].ffill()
+wf_df = wf_df.dropna(subset=["SPY", "QQQ"]).reset_index(drop=True)
+
+# Count trading hours per day (for hourly cost conversion)
+hours_per_day = wf_df.groupby(wf_df["timestamp"].dt.date).size().median()
+print(f"\nMedian trading hours/day: {hours_per_day}")
+print(f"Rows: {len(wf_df)}")
+
+# ── 3. STRATEGY RUNNER WITH BORROW COST ──────────────────────
+def run_expansion_leverage_with_cost(df, expansion_lev=1.0):
+    capital = INITIAL_CAPITAL
+    portfolio = [capital]
+    active_asset = "START"
+
+    for i in range(1, len(df)):
+        regime = int(df.loc[i - 1, "predicted_regime"])
+        ts = df.loc[i, "timestamp"]
+        yr = ts.year
+
+        if regime == 0:  # Expansion → leveraged QQQ
+            target = f"QQQ_{expansion_lev}x"
+            raw_ret = df.loc[i, "QQQ"] / df.loc[i - 1, "QQQ"] - 1
+            lev_ret = expansion_lev * raw_ret
+
+            # Hourly borrow cost on the leveraged portion
+            annual_rate = borrow_rate_by_year.get(yr, borrow_rate_by_year.iloc[-1])
+            hourly_cost = (expansion_lev - 1) * annual_rate / (TRADING_DAYS * hours_per_day)
+            ret = lev_ret - hourly_cost
+
+        elif regime == 1:  # Slowdown → 1x SPY (no leverage cost)
+            target = "SPY"
+            ret = df.loc[i, "SPY"] / df.loc[i - 1, "SPY"] - 1
+
+        else:  # Contraction → CASH
+            target = "CASH"
+            ret = 0.0
+
+        cost = SWITCH_COST if target != active_asset else 0.0
+        capital *= (1 + ret - cost)
+        portfolio.append(capital)
+        active_asset = target
+
+    return pd.Series(portfolio, index=df["timestamp"])
+
+# ── 4. METRICS ───────────────────────────────────────────────
+def compute_metrics(nav: pd.Series):
+    daily_nav = nav.resample("D").last().dropna()
+    daily_ret = daily_nav.pct_change(fill_method=None).dropna()
+
+    start_val = float(daily_nav.iloc[0])
+    end_val   = float(daily_nav.iloc[-1])
+    total_return = end_val / start_val - 1
+    cal_days = (daily_nav.index[-1] - daily_nav.index[0]).days
+    years = cal_days / CAL_DAYS
+
+    cagr = (end_val / start_val) ** (1 / years) - 1 if years > 0 else np.nan
+    vol  = daily_ret.std() * np.sqrt(TRADING_DAYS)
+    sharpe = daily_ret.mean() / daily_ret.std() * np.sqrt(TRADING_DAYS) if daily_ret.std() else np.nan
+
+    down = daily_ret[daily_ret < 0]
+    sortino = daily_ret.mean() / down.std() * np.sqrt(TRADING_DAYS) if len(down) and down.std() else np.nan
+
+    dd = daily_nav / daily_nav.cummax() - 1
+    max_dd = dd.min()
+    calmar = cagr / abs(max_dd) if max_dd != 0 else np.nan
+
+    return {
+        "Final Value": end_val,
+        "Total Return": total_return,
+        "CAGR": cagr,
+        "Annual Volatility": vol,
+        "Sharpe": sharpe,
+        "Sortino": sortino,
+        "Max Drawdown": max_dd,
+        "Calmar": calmar
+    }
+
+# ── 5. RUN GRID ──────────────────────────────────────────────
+rows = []
+for lev in LEVERAGE_GRID:
+    nav = run_expansion_leverage_with_cost(wf_df, expansion_lev=lev)
+    m = compute_metrics(nav)
+    m["Expansion Leverage"] = lev
+    rows.append(m)
+
+# SPY benchmark
+spy_nav = INITIAL_CAPITAL * (wf_df.set_index("timestamp")["SPY"] / wf_df["SPY"].iloc[0])
+spy_m = compute_metrics(spy_nav)
+spy_m["Expansion Leverage"] = "SPY"
+rows.append(spy_m)
+
+results_cost = pd.DataFrame(rows)
+results_cost = results_cost[
+    ["Expansion Leverage", "Final Value", "Total Return", "CAGR",
+     "Annual Volatility", "Sharpe", "Sortino", "Max Drawdown", "Calmar"]
+]
+
+# ── 6. FORMAT ────────────────────────────────────────────────
+fmt = results_cost.copy()
+fmt["Expansion Leverage"] = fmt["Expansion Leverage"].apply(
+    lambda x: f"{x:.2f}x" if isinstance(x, float) else x
+)
+fmt["Final Value"] = fmt["Final Value"].apply(
+    lambda x: f"{x:,.0f}" if pd.notna(x) else x
+)
+for c in ["Total Return", "CAGR", "Annual Volatility", "Max Drawdown"]:
+    fmt[c] = fmt[c].apply(lambda x: f"{x*100:.2f}%" if pd.notna(x) else x)
+for c in ["Sharpe", "Sortino", "Calmar"]:
+    fmt[c] = fmt[c].apply(lambda x: f"{x:.2f}" if pd.notna(x) else x)
+
+print("\n=== LEVERAGE SWEEP WITH BORROWING COST ===")
+print(f"    Borrow rate = 10yr UST avg + 50bps")
+print(f"    Cost applied to (N-1) leveraged portion, hourly\n")
+display(fmt)
+
+# ── 7. PPT TABLE IMAGE ───────────────────────────────────────
+fmt_table = fmt[fmt["Expansion Leverage"] != "SPY"].copy()
+table_cols = ["Expansion Leverage", "Final Value", "CAGR",
+              "Annual Volatility", "Sharpe", "Max Drawdown", "Calmar"]
+table_data = fmt_table[table_cols]
+
+fig, ax = plt.subplots(figsize=(16, 5))
+ax.axis("off")
+
+tbl = ax.table(
+    cellText=table_data.values,
+    colLabels=table_cols,
+    cellLoc="center",
+    loc="center"
+)
+tbl.auto_set_font_size(False)
+tbl.set_fontsize(10)
+tbl.scale(1, 1.6)
+
+for c in range(len(table_cols)):
+    tbl[(0, c)].set_text_props(weight="bold")
+    tbl[(0, c)].set_height(0.12)
+
+highlight = {1: "#f2f2f2", 2: "#f2f2f2", 3: "#eaf4ea"}
+for r, color in highlight.items():
+    for c in range(len(table_cols)):
+        tbl[(r, c)].set_facecolor(color)
+
+plt.title("Expansion Leverage Sensitivity (incl. Borrowing Cost: 10yr UST + 50bps)",
+          fontsize=14, pad=16)
+plt.tight_layout()
+
+EXPORT = "/Volumes/pawan_quant_research_1/default/market_data"
+plt.savefig(f"{EXPORT}/ppt_leverage_with_borrow_cost.png", dpi=220, bbox_inches="tight")
+plt.show()
+
+# ── 8. RISK APPETITE TABLE ───────────────────────────────────
+numeric = results_cost[results_cost["Expansion Leverage"] != "SPY"].copy()
+numeric["Expansion Leverage"] = numeric["Expansion Leverage"].astype(float)
+
+def bucket(lev):
+    if lev <= 1.25: return "Conservative"
+    elif lev <= 1.50: return "Balanced"
+    else: return "Aggressive"
+
+numeric["Bucket"] = numeric["Expansion Leverage"].map(bucket)
+
+risk_agg = numeric.groupby("Bucket").agg(
+    lev_min=("Expansion Leverage", "min"),
+    lev_max=("Expansion Leverage", "max"),
+    best_cagr=("CAGR", "max"),
+    max_vol=("Annual Volatility", "max"),
+    worst_dd=("Max Drawdown", "min"),
+    best_sharpe=("Sharpe", "max")
+).reindex(["Aggressive", "Balanced", "Conservative"])
+
+risk_table = pd.DataFrame({
+    "Risk Appetite": risk_agg.index,
+    "Leverage Range": [f"{r.lev_min:.2f}x \u2013 {r.lev_max:.2f}x" for _, r in risk_agg.iterrows()],
+    "Best CAGR": [f"{r.best_cagr*100:.2f}%" for _, r in risk_agg.iterrows()],
+    "Max Volatility": [f"{r.max_vol*100:.2f}%" for _, r in risk_agg.iterrows()],
+    "Worst Max Drawdown": [f"{r.worst_dd*100:.2f}%" for _, r in risk_agg.iterrows()],
+    "Best Sharpe": [f"{r.best_sharpe:.2f}" for _, r in risk_agg.iterrows()]
+})
+
+print("\n=== RISK APPETITE SUMMARY (with borrow cost) ===")
+display(risk_table)
+
+# ── 9. SAVE TO 20260401 FOLDER ───────────────────────────────
+EXPORT_DIR = "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/04_Backtesting/20260401"
+results_cost.to_csv(f"{EXPORT_DIR}/20260401_FINAL_leverage_sweep_with_borrow_cost.csv", index=False)
+print(f"\nSaved: {EXPORT_DIR}/20260401_FINAL_leverage_sweep_with_borrow_cost.csv")
+
+# COMMAND ----------
+
+# ============================================================
+# PPT-READY LEVERAGE TABLE + CHARTS
+# Assumes `results` already exists from the leverage sweep
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ------------------------------------------------------------
+# 1. CLEAN / SORT
+# ------------------------------------------------------------
+plot_df = results.copy()
+
+# keep leverage rows separate from SPY
+lev_df = plot_df[plot_df["Expansion Leverage"] != "SPY"].copy()
+lev_df["Expansion Leverage"] = lev_df["Expansion Leverage"].astype(float)
+lev_df = lev_df.sort_values("Expansion Leverage").reset_index(drop=True)
+
+spy_df = plot_df[plot_df["Expansion Leverage"] == "SPY"].copy()
+
+# ------------------------------------------------------------
+# 2. FORMATTED TABLE FOR DECK
+# ------------------------------------------------------------
+table_df = lev_df.copy()
+
+table_df["Expansion Leverage"] = table_df["Expansion Leverage"].map(lambda x: f"{x:.2f}x")
+table_df["Final Value"] = table_df["Final Value"].map(lambda x: f"{x:,.0f}")
+table_df["Total Return"] = table_df["Total Return"].map(lambda x: f"{x*100:.2f}%")
+table_df["CAGR"] = table_df["CAGR"].map(lambda x: f"{x*100:.2f}%")
+table_df["Annual Volatility"] = table_df["Annual Volatility"].map(lambda x: f"{x*100:.2f}%")
+table_df["Sharpe"] = table_df["Sharpe"].map(lambda x: f"{x:.2f}")
+table_df["Sortino"] = table_df["Sortino"].map(lambda x: f"{x:.2f}")
+table_df["Max Drawdown"] = table_df["Max Drawdown"].map(lambda x: f"{x*100:.2f}%")
+table_df["Calmar"] = table_df["Calmar"].map(lambda x: f"{x:.2f}")
+
+table_df = table_df[
+    [
+        "Expansion Leverage",
+        "Final Value",
+        "CAGR",
+        "Annual Volatility",
+        "Sharpe",
+        "Max Drawdown",
+        "Calmar"
+    ]
+]
+
+print("=== LEVERAGE SENSITIVITY TABLE ===")
+display(table_df)
+
+# Optional export for deck
+EXPORT_PATH = "/Volumes/pawan_quant_research_1/default/market_data"
+table_df.to_csv(f"{EXPORT_PATH}/ppt_leverage_sensitivity_table.csv", index=False)
+print(f"Saved: {EXPORT_PATH}/ppt_leverage_sensitivity_table.csv")
+
+# ------------------------------------------------------------
+# 3. FRONTIER CHART: CAGR vs VOL
+# ------------------------------------------------------------
+plt.figure(figsize=(12, 7))
+
+plt.scatter(
+    lev_df["Annual Volatility"] * 100,
+    lev_df["CAGR"] * 100,
+    s=120
+)
+
+for _, row in lev_df.iterrows():
+    plt.annotate(
+        f"{row['Expansion Leverage']:.2f}x",
+        (row["Annual Volatility"] * 100, row["CAGR"] * 100),
+        xytext=(5, 5),
+        textcoords="offset points",
+        fontsize=10
+    )
+
+if len(spy_df) > 0:
+    plt.scatter(
+        spy_df["Annual Volatility"] * 100,
+        spy_df["CAGR"] * 100,
+        s=160,
+        marker="X",
+        label="SPY"
+    )
+    for _, row in spy_df.iterrows():
+        plt.annotate(
+            "SPY",
+            (row["Annual Volatility"] * 100, row["CAGR"] * 100),
+            xytext=(6, -12),
+            textcoords="offset points",
+            fontsize=10
+        )
+
+plt.xlabel("Annual Volatility (%)")
+plt.ylabel("CAGR (%)")
+plt.title("Expansion Leverage Frontier: Return vs Risk")
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------------------
+# 4. LINE CHART: LEVERAGE VS KEY METRICS
+# ------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(12, 7))
+
+x = lev_df["Expansion Leverage"]
+
+ax.plot(x, lev_df["CAGR"] * 100, marker="o", label="CAGR (%)")
+ax.plot(x, lev_df["Annual Volatility"] * 100, marker="o", label="Volatility (%)")
+ax.plot(x, lev_df["Max Drawdown"] * -100, marker="o", label="Max Drawdown (%)")
+
+ax.set_xlabel("Expansion Leverage (x)")
+ax.set_ylabel("Percent (%)")
+ax.set_title("Leverage Sensitivity: CAGR, Volatility, and Drawdown")
+ax.grid(alpha=0.3)
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------------------
+# 5. SHARPE / CALMAR CHART
+# ------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(12, 7))
+
+ax.plot(x, lev_df["Sharpe"], marker="o", label="Sharpe")
+ax.plot(x, lev_df["Calmar"], marker="o", label="Calmar")
+
+ax.set_xlabel("Expansion Leverage (x)")
+ax.set_ylabel("Ratio")
+ax.set_title("Leverage Sensitivity: Risk-Adjusted Performance")
+ax.grid(alpha=0.3)
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------------------
+# 6. RISK-APPETITE BUCKET TABLE
+# ------------------------------------------------------------
+def risk_bucket(lev):
+    if lev <= 1.25:
+        return "Conservative"
+    elif lev <= 1.50:
+        return "Balanced"
+    else:
+        return "Aggressive"
+
+bucket_df = lev_df.copy()
+bucket_df["Risk Appetite"] = bucket_df["Expansion Leverage"].apply(risk_bucket)
+
+bucket_summary = (
+    bucket_df.groupby("Risk Appetite")
+    .agg({
+        "Expansion Leverage": ["min", "max"],
+        "CAGR": "max",
+        "Annual Volatility": "max",
+        "Max Drawdown": "min",
+        "Sharpe": "max"
+    })
+)
+
+bucket_summary.columns = [
+    "Min Leverage",
+    "Max Leverage",
+    "Best CAGR",
+    "Max Volatility",
+    "Worst Max Drawdown",
+    "Best Sharpe"
+]
+
+bucket_summary = bucket_summary.reset_index()
+
+bucket_summary_fmt = bucket_summary.copy()
+bucket_summary_fmt["Leverage Range"] = (
+    bucket_summary_fmt["Min Leverage"].map(lambda x: f"{x:.2f}x") +
+    " – " +
+    bucket_summary_fmt["Max Leverage"].map(lambda x: f"{x:.2f}x")
+)
+bucket_summary_fmt["Best CAGR"] = bucket_summary_fmt["Best CAGR"].map(lambda x: f"{x*100:.2f}%")
+bucket_summary_fmt["Max Volatility"] = bucket_summary_fmt["Max Volatility"].map(lambda x: f"{x*100:.2f}%")
+bucket_summary_fmt["Worst Max Drawdown"] = bucket_summary_fmt["Worst Max Drawdown"].map(lambda x: f"{x*100:.2f}%")
+bucket_summary_fmt["Best Sharpe"] = bucket_summary_fmt["Best Sharpe"].map(lambda x: f"{x:.2f}")
+
+bucket_summary_fmt = bucket_summary_fmt[
+    ["Risk Appetite", "Leverage Range", "Best CAGR", "Max Volatility", "Worst Max Drawdown", "Best Sharpe"]
+]
+
+print("=== RISK APPETITE TABLE ===")
+display(bucket_summary_fmt)
+
+bucket_summary_fmt.to_csv(f"{EXPORT_PATH}/ppt_risk_appetite_table.csv", index=False)
+print(f"Saved: {EXPORT_PATH}/ppt_risk_appetite_table.csv")
+
+# COMMAND ----------
+
+# ============================================================
+# PPT TABLE CHART — EXPANSION LEVERAGE SENSITIVITY
+# Updated: uses results_cost (incl. borrowing cost: 10yr UST + 50bps)
+# ============================================================
+
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Build table dynamically from results_cost
+lev_only = results_cost[results_cost["Expansion Leverage"] != "SPY"].copy()
+lev_only["Expansion Leverage"] = lev_only["Expansion Leverage"].astype(float)
+lev_only = lev_only.sort_values("Expansion Leverage").reset_index(drop=True)
+
+exp_table = pd.DataFrame({
+    "Expansion Leverage": lev_only["Expansion Leverage"].map(lambda x: f"{x:.2f}x"),
+    "Final Value":        lev_only["Final Value"].map(lambda x: f"{x:,.0f}"),
+    "CAGR":               lev_only["CAGR"].map(lambda x: f"{x*100:.2f}%"),
+    "Annual Volatility":  lev_only["Annual Volatility"].map(lambda x: f"{x*100:.2f}%"),
+    "Sharpe":             lev_only["Sharpe"].map(lambda x: f"{x:.2f}"),
+    "Max Drawdown":       lev_only["Max Drawdown"].map(lambda x: f"{x*100:.2f}%"),
+    "Calmar":             lev_only["Calmar"].map(lambda x: f"{x:.2f}")
+})
+
+print("Leverage Sensitivity (incl. borrow cost: 10yr UST + 50bps):")
+display(exp_table)
+
+fig, ax = plt.subplots(figsize=(16, 4.8))
+ax.axis("off")
+
+tbl = ax.table(
+    cellText=exp_table.values,
+    colLabels=exp_table.columns,
+    cellLoc="center",
+    loc="center"
+)
+
+tbl.auto_set_font_size(False)
+tbl.set_fontsize(10)
+tbl.scale(1, 1.6)
+
+# Header styling
+for c in range(len(exp_table.columns)):
+    cell = tbl[(0, c)]
+    cell.set_text_props(weight="bold")
+    cell.set_height(0.12)
+
+# Highlight conservative / balanced rows
+highlight_rows = {
+    1: "#f2f2f2",   # 1.00x
+    2: "#f2f2f2",   # 1.25x
+    3: "#eaf4ea"    # 1.50x
+}
+for r, color in highlight_rows.items():
+    for c in range(len(exp_table.columns)):
+        tbl[(r, c)].set_facecolor(color)
+
+plt.title("Expansion Leverage Sensitivity (incl. Borrowing Cost: 10yr UST + 50bps)",
+          fontsize=14, pad=16)
+plt.tight_layout()
+
+EXPORT_PATH = "/Volumes/pawan_quant_research_1/default/market_data"
+plt.savefig(f"{EXPORT_PATH}/ppt_expansion_leverage_table.png", dpi=220, bbox_inches="tight")
+plt.show()
+
+print(f"Saved: {EXPORT_PATH}/ppt_expansion_leverage_table.png")
+
+# COMMAND ----------
+
+# ============================================================
+# PPT TABLE CHART — RISK APPETITE FRAMING
+# Updated: uses results_cost from leverage sweep WITH borrow cost
+# ============================================================
+
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Build risk appetite table from latest leverage sweep (with borrowing cost)
+numeric_ra = results_cost[results_cost["Expansion Leverage"] != "SPY"].copy()
+numeric_ra["Expansion Leverage"] = numeric_ra["Expansion Leverage"].astype(float)
+
+def _bucket(lev):
+    if lev <= 1.25: return "Conservative"
+    elif lev <= 2.50: return "Balanced"
+    else: return "Aggressive"
+
+numeric_ra["Bucket"] = numeric_ra["Expansion Leverage"].map(_bucket)
+
+ra_agg = numeric_ra.groupby("Bucket").agg(
+    lev_min=("Expansion Leverage", "min"),
+    lev_max=("Expansion Leverage", "max"),
+    best_cagr=("CAGR", "max"),
+    max_vol=("Annual Volatility", "max"),
+    worst_dd=("Max Drawdown", "min"),
+    best_sharpe=("Sharpe", "max")
+).reindex(["Aggressive", "Balanced", "Conservative"])
+
+risk_table = pd.DataFrame({
+    "Risk Appetite":       ra_agg.index.tolist(),
+    "Leverage Range":      [f"{r.lev_min:.2f}x \u2013 {r.lev_max:.2f}x" for _, r in ra_agg.iterrows()],
+    "Best CAGR":           [f"{r.best_cagr*100:.2f}%" for _, r in ra_agg.iterrows()],
+    "Max Volatility":      [f"{r.max_vol*100:.2f}%" for _, r in ra_agg.iterrows()],
+    "Worst Max Drawdown":  [f"{r.worst_dd*100:.2f}%" for _, r in ra_agg.iterrows()],
+    "Best Sharpe":         [f"{r.best_sharpe:.2f}" for _, r in ra_agg.iterrows()]
+})
+
+print("Risk Appetite Table (incl. borrow cost: 10yr UST + 50bps):")
+display(risk_table)
+
+fig, ax = plt.subplots(figsize=(12, 3.2))
+ax.axis("off")
+
+tbl = ax.table(
+    cellText=risk_table.values,
+    colLabels=risk_table.columns,
+    cellLoc="center",
+    loc="center"
+)
+
+tbl.auto_set_font_size(False)
+tbl.set_fontsize(11)
+tbl.scale(1, 1.9)
+
+# Header styling
+for c in range(len(risk_table.columns)):
+    cell = tbl[(0, c)]
+    cell.set_text_props(weight="bold")
+    cell.set_height(0.18)
+
+# Row colors
+row_colors = {
+    1: "#fdeaea",   # Aggressive
+    2: "#eaf4ea",   # Balanced
+    3: "#f2f2f2"    # Conservative
+}
+for r, color in row_colors.items():
+    for c in range(len(risk_table.columns)):
+        tbl[(r, c)].set_facecolor(color)
+
+plt.title("Leverage as a Function of Risk Appetite (incl. Borrowing Cost)", fontsize=15, pad=16)
+plt.tight_layout()
+
+EXPORT_PATH = "/Volumes/pawan_quant_research_1/default/market_data"
+plt.savefig(f"{EXPORT_PATH}/ppt_risk_appetite_table.png", dpi=220, bbox_inches="tight")
+plt.show()
+
+print(f"Saved: {EXPORT_PATH}/ppt_risk_appetite_table.png")
+
+# COMMAND ----------
+
+# DBTITLE 1,PPT — Annual Returns Bar Chart (2021–2026 YTD)
+# ============================================================
+# ANNUAL RETURNS BAR CHART: V4 WF vs SPY
+# 2021 through 2026 YTD (Jan–Mar)
+# Uses bronze_bt_market_1h for prices (no yfinance dependency)
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+START = "2021-01-01"
+END   = "2026-03-31"
+
+# ── 1. LOAD V4 SIGNALS (Delta) ──────────────────────────────
+v4 = (
+    spark.table("pawan_quant_research_1.default.bt_walkforward_regime_signals")
+    .toPandas()
+)
+v4["timestamp"] = pd.to_datetime(v4["timestamp"])
+v4 = v4.set_index("timestamp").sort_index()["predicted_regime"]
+v4 = v4.loc[START:END]
+
+# ── 2. LOAD DAILY PRICES (bronze hourly → daily close) ─────
+prices_h = (
+    spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+    .filter("symbol IN ('SPY','QQQ')")
+    .toPandas()
+)
+prices_h["timestamp"] = pd.to_datetime(prices_h["timestamp"])
+prices_daily = (
+    prices_h
+    .pivot_table(index="timestamp", columns="symbol", values="close", aggfunc="last")
+    .resample("D").last()
+    .dropna()
+)
+returns = prices_daily.pct_change().dropna()
+returns = returns.loc[START:END]
+
+# ── 3. ALIGN SIGNALS TO DAILY ─────────────────────────────
+v4_d = v4.resample("D").ffill().reindex(returns.index, method="ffill")
+
+def strategy_daily_returns(regime_series):
+    out = []
+    for dt, reg in regime_series.items():
+        if reg == 0:
+            out.append(returns.loc[dt, "QQQ"])
+        elif reg == 1:
+            out.append(returns.loc[dt, "SPY"])
+        else:
+            out.append(0.0)
+    return pd.Series(out, index=regime_series.index)
+
+ret_v4  = strategy_daily_returns(v4_d)
+ret_spy = returns["SPY"].reindex(ret_v4.index).fillna(0.0)
+
+daily_ret = pd.DataFrame({
+    "WalkForward_V4": ret_v4,
+    "SPY": ret_spy
+})
+
+# ── 4. YEARLY RETURNS ─────────────────────────────────────
+full_years = daily_ret.loc[:"2025-12-31"].resample("YE").apply(lambda x: (1 + x).prod() - 1)
+full_years.index = full_years.index.year
+
+ytd_2026 = (1 + daily_ret.loc["2026-01-01":END]).prod() - 1
+ytd_2026.name = 2026
+
+yearly = pd.concat([full_years, ytd_2026.to_frame().T])
+yearly.index.name = "Year"
+
+print("Annual returns (%) including 2026 YTD:")
+display((yearly * 100).round(2))
+
+# ── 5. PPT BAR CHART ─────────────────────────────────────
+fig, ax = plt.subplots(figsize=(14, 7))
+
+plot_data = (yearly * 100).copy()
+labels = [str(y) if y != 2026 else "2026 YTD" for y in plot_data.index]
+
+x = np.arange(len(labels))
+width = 0.35
+
+colors_map = {"WalkForward_V4": "#5B2C8C", "SPY": "#B088D4"}
+
+offset = -width / 2
+for col in plot_data.columns:
+    vals = plot_data[col].values
+    bars = ax.bar(x + offset, vals, width, label=col, color=colors_map.get(col), edgecolor="white")
+    for bar, val in zip(bars, vals):
+        if not np.isnan(val):
+            y_pos = bar.get_height()
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                y_pos + (1.0 if y_pos >= 0 else -2.5),
+                f"{val:.1f}%",
+                ha="center", va="bottom" if y_pos >= 0 else "top",
+                fontsize=9, fontweight="bold"
+            )
+    offset += width
+
+ax.set_xticks(x)
+ax.set_xticklabels(labels, fontsize=12)
+ax.axhline(0, color="black", linewidth=0.8)
+ax.set_ylabel("Return (%)", fontsize=12)
+ax.set_title("Annual Returns: Walk-Forward V4 vs SPY (2021–2026 YTD)", fontsize=15, pad=12)
+ax.grid(axis="y", alpha=0.3)
+ax.legend(fontsize=11, loc="upper left")
+plt.tight_layout()
+
+EXPORT = "/Volumes/pawan_quant_research_1/default/market_data"
+plt.savefig(f"{EXPORT}/ppt_annual_returns_2021_2026ytd.png", dpi=220, bbox_inches="tight")
+plt.show()
+
+EXPORT_DIR = "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/04_Backtesting/20260401"
+yearly.to_csv(f"{EXPORT_DIR}/20260401_FINAL_yearly_returns_v4_spy.csv")
+print(f"\nSaved chart: {EXPORT}/ppt_annual_returns_2021_2026ytd.png")
+print(f"Saved CSV:   {EXPORT_DIR}/20260401_FINAL_yearly_returns_v4_spy.csv")
+
+# COMMAND ----------
+
+# DBTITLE 1,PPT — Trailing 1yr / 3yr / 5yr Performance
+# ============================================================
+# TRAILING 1-YEAR, 3-YEAR, 5-YEAR PERFORMANCE
+# V4 WF vs SPY — As of March 31, 2026
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+AS_OF = "2026-03-31"
+TRADING_DAYS = 252
+CAL_DAYS = 365.25
+
+# ── 1. BUILD CUMULATIVE NAV (from daily_ret in prev cell) ───
+nav = (1 + daily_ret).cumprod()
+
+windows = {
+    "1 Year":  ("2025-04-01", AS_OF),
+    "3 Year":  ("2023-04-01", AS_OF),
+    "5 Year":  ("2021-01-01", AS_OF),
+}
+
+# ── 2. METRICS FUNCTION ───────────────────────────────────
+def trailing_metrics(daily_rets, label):
+    cum = (1 + daily_rets).cumprod()
+    start_val = cum.iloc[0]
+    end_val   = cum.iloc[-1]
+    total_ret = end_val / start_val - 1
+    cal_days  = (cum.index[-1] - cum.index[0]).days
+    years     = cal_days / CAL_DAYS
+
+    cagr = (end_val / start_val) ** (1 / years) - 1 if years > 0 else np.nan
+    vol  = daily_rets.std() * np.sqrt(TRADING_DAYS)
+    sharpe = (daily_rets.mean() / daily_rets.std() * np.sqrt(TRADING_DAYS)
+              if daily_rets.std() != 0 else np.nan)
+    down = daily_rets[daily_rets < 0]
+    sortino = (daily_rets.mean() / down.std() * np.sqrt(TRADING_DAYS)
+               if len(down) > 0 and down.std() != 0 else np.nan)
+    dd = cum / cum.cummax() - 1
+    max_dd = dd.min()
+
+    return {
+        "Window": label,
+        "Total Return": total_ret,
+        "CAGR": cagr,
+        "Volatility": vol,
+        "Sharpe": sharpe,
+        "Sortino": sortino,
+        "Max Drawdown": max_dd
+    }
+
+# ── 3. COMPUTE FOR EACH WINDOW × STRATEGY ─────────────────
+rows = []
+for wlabel, (ws, we) in windows.items():
+    slice_ret = daily_ret.loc[ws:we]
+    if len(slice_ret) == 0:
+        continue
+    for strat in daily_ret.columns:
+        m = trailing_metrics(slice_ret[strat], wlabel)
+        m["Strategy"] = strat
+        rows.append(m)
+
+trailing = pd.DataFrame(rows)
+
+# ── 4. FORMATTED TABLE ────────────────────────────────────
+trailing_fmt = trailing.copy()
+for c in ["Total Return", "CAGR", "Volatility", "Max Drawdown"]:
+    trailing_fmt[c] = trailing_fmt[c].map(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "N/A")
+for c in ["Sharpe", "Sortino"]:
+    trailing_fmt[c] = trailing_fmt[c].map(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+
+print("Trailing Performance as of", AS_OF)
+display(trailing_fmt[["Window","Strategy","Total Return","CAGR","Volatility","Sharpe","Sortino","Max Drawdown"]])
+
+# ── 5. PPT CHART: CAGR / SHARPE / MAX DD GROUPED BAR ───────
+fig, axes = plt.subplots(1, 3, figsize=(18, 6), sharey=False)
+
+metric_cols   = ["CAGR", "Sharpe", "Max Drawdown"]
+metric_titles = ["CAGR (%)", "Sharpe Ratio", "Max Drawdown (%)"]
+metric_mult   = [100, 1, 100]
+
+colors_map = {"WalkForward_V4": "#5B2C8C", "SPY": "#B088D4"}
+strategies = daily_ret.columns.tolist()
+win_labels = list(windows.keys())
+
+for idx, (metric, title, mult) in enumerate(zip(metric_cols, metric_titles, metric_mult)):
+    ax = axes[idx]
+    x = np.arange(len(win_labels))
+    width = 0.35
+    offset = -width / 2
+
+    for strat in strategies:
+        vals = []
+        for wl in win_labels:
+            row = trailing[(trailing["Window"] == wl) & (trailing["Strategy"] == strat)]
+            if len(row) > 0:
+                vals.append(float(row[metric].iloc[0]) * mult)
+            else:
+                vals.append(0)
+        bars = ax.bar(x + offset, vals, width, label=strat,
+                      color=colors_map.get(strat), edgecolor="white")
+        for bar, v in zip(bars, vals):
+            y = bar.get_height()
+            fmt = f"{v:.1f}%" if mult == 100 else f"{v:.2f}"
+            ax.text(bar.get_x() + bar.get_width()/2, y + (0.3 if y >= 0 else -0.8),
+                    fmt, ha="center", va="bottom" if y >= 0 else "top",
+                    fontsize=9, fontweight="bold")
+        offset += width
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(win_labels, fontsize=11)
+    ax.set_title(title, fontsize=13, pad=8)
+    ax.axhline(0, color="black", linewidth=0.6)
+    ax.grid(axis="y", alpha=0.3)
+    if idx == 0:
+        ax.legend(fontsize=10, loc="upper left")
+
+plt.suptitle(f"Trailing Performance: V4 Walk-Forward vs SPY — as of {AS_OF}", fontsize=16, y=1.02)
+plt.tight_layout()
+
+EXPORT = "/Volumes/pawan_quant_research_1/default/market_data"
+plt.savefig(f"{EXPORT}/ppt_trailing_1yr_3yr_5yr.png", dpi=220, bbox_inches="tight")
+plt.show()
+
+# ── 6. PPT TABLE IMAGE ────────────────────────────────────
+table_data = []
+for wl in win_labels:
+    for strat in strategies:
+        row = trailing_fmt[(trailing_fmt["Window"] == wl) & (trailing_fmt["Strategy"] == strat)]
+        if len(row) > 0:
+            table_data.append([
+                wl, strat,
+                row["CAGR"].iloc[0], row["Volatility"].iloc[0],
+                row["Sharpe"].iloc[0], row["Sortino"].iloc[0],
+                row["Max Drawdown"].iloc[0]
+            ])
+
+fig, ax = plt.subplots(figsize=(14, 4))
+ax.axis("off")
+
+tbl = ax.table(
+    cellText=table_data,
+    colLabels=["Window", "Strategy", "CAGR", "Volatility", "Sharpe", "Sortino", "Max DD"],
+    cellLoc="center",
+    loc="center"
+)
+tbl.auto_set_font_size(False)
+tbl.set_fontsize(10)
+tbl.scale(1, 1.7)
+
+for c in range(7):
+    tbl[(0, c)].set_text_props(weight="bold")
+    tbl[(0, c)].set_height(0.1)
+
+# Alternate row colors by window (purple theme)
+row_idx = 1
+for wl in win_labels:
+    color = "#F0E6F6" if win_labels.index(wl) % 2 == 0 else "#ffffff"
+    for strat in strategies:
+        for c in range(7):
+            tbl[(row_idx, c)].set_facecolor(color)
+        row_idx += 1
+
+plt.title(f"Trailing Performance Summary: V4 WF vs SPY — as of {AS_OF}", fontsize=14, pad=14)
+plt.tight_layout()
+plt.savefig(f"{EXPORT}/ppt_trailing_performance_table.png", dpi=220, bbox_inches="tight")
+plt.show()
+
+# Save to 20260401 folder
+EXPORT_DIR = "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/04_Backtesting/20260401"
+trailing.to_csv(f"{EXPORT_DIR}/20260401_FINAL_trailing_performance.csv", index=False)
+print(f"\nSaved charts + CSV to {EXPORT_DIR}")
