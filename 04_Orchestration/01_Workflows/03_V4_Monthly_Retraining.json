@@ -11,28 +11,28 @@
     {
       "task_key": "macro_incremental_update",
       "notebook_task": {
-        "notebook_path": "{{workspace_repo_path}}/01_Processing/01_Ingestion/03_BT_Macro_Incremental_Update"
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/01_Ingestion/03_BT_Macro_Incremental_Update"
       }
     },
     {
       "task_key": "silver_incremental_refresh",
       "depends_on": [{"task_key": "macro_incremental_update"}],
       "notebook_task": {
-        "notebook_path": "{{workspace_repo_path}}/01_Processing/02_Features/02_BT_Incremental_Silver_Refresh"
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/02_Features/02_BT_Incremental_Silver_Refresh"
       }
     },
     {
       "task_key": "monthly_walkforward_retrain",
       "depends_on": [{"task_key": "silver_incremental_refresh"}],
       "notebook_task": {
-        "notebook_path": "{{workspace_repo_path}}/01_Processing/04_Retraining/01_Monthly_Walkforward_Retrain"
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/04_Retraining/01_Monthly_Walkforward_Retrain"
       }
     },
     {
       "task_key": "performance_exports",
       "depends_on": [{"task_key": "monthly_walkforward_retrain"}],
       "notebook_task": {
-        "notebook_path": "{{workspace_repo_path}}/02_Analysis/01_Performance/03_Performance_Exports"
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/02_Analysis/01_Performance/03_Performance_Exports"
       }
     }
   ]

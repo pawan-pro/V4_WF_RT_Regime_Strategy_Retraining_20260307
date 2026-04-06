@@ -11,49 +11,49 @@
     {
       "task_key": "rt_01_market",
       "notebook_task": {
-        "notebook_path": "{{workspace_repo_path}}/01_Processing/03_Realtime/01_RT_Live_Market_Ingestion"
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/01_RT_Live_Market_Ingestion"
       }
     },
     {
       "task_key": "rt_02_vix",
       "depends_on": [{"task_key": "rt_01_market"}],
       "notebook_task": {
-        "notebook_path": "{{workspace_repo_path}}/01_Processing/03_Realtime/02_RT_Live_Rates_VIX_Ingestion"
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/02_RT_Live_Rates_VIX_Ingestion"
       }
     },
     {
       "task_key": "rt_03_silver",
       "depends_on": [{"task_key": "rt_02_vix"}],
       "notebook_task": {
-        "notebook_path": "{{workspace_repo_path}}/01_Processing/03_Realtime/03_RT_Silver_RT_Enrichment"
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/03_RT_Silver_RT_Enrichment"
       }
     },
     {
       "task_key": "rt_04_inference",
       "depends_on": [{"task_key": "rt_03_silver"}],
       "notebook_task": {
-        "notebook_path": "{{workspace_repo_path}}/01_Processing/03_Realtime/04_RT_Model_Inference_Engine"
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/04_RT_Model_Inference_Engine"
       }
     },
     {
       "task_key": "rt_05_trade",
       "depends_on": [{"task_key": "rt_04_inference"}],
       "notebook_task": {
-        "notebook_path": "{{workspace_repo_path}}/01_Processing/03_Realtime/05_RT_Paper_Trade_Execution"
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/05_RT_Paper_Trade_Execution"
       }
     },
     {
       "task_key": "rt_06_audit",
       "depends_on": [{"task_key": "rt_05_trade"}],
       "notebook_task": {
-        "notebook_path": "{{workspace_repo_path}}/01_Processing/03_Realtime/06_RT_Signal_Audit_Log"
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/06_RT_Signal_Audit_Log"
       }
     },
     {
       "task_key": "rt_07_dashboard",
       "depends_on": [{"task_key": "rt_06_audit"}],
       "notebook_task": {
-        "notebook_path": "{{workspace_repo_path}}/01_Processing/03_Realtime/07_RT_Dashboard_Feed"
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/07_RT_Dashboard_Feed"
       }
     }
   ]

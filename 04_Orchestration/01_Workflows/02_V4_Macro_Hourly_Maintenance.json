@@ -11,14 +11,14 @@
     {
       "task_key": "macro_incremental_update",
       "notebook_task": {
-        "notebook_path": "{{workspace_repo_path}}/01_Processing/01_Ingestion/03_BT_Macro_Incremental_Update"
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/01_Ingestion/03_BT_Macro_Incremental_Update"
       }
     },
     {
       "task_key": "silver_incremental_refresh",
       "depends_on": [{"task_key": "macro_incremental_update"}],
       "notebook_task": {
-        "notebook_path": "{{workspace_repo_path}}/01_Processing/02_Features/02_BT_Incremental_Silver_Refresh"
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/02_Features/02_BT_Incremental_Silver_Refresh"
       }
     }
   ]
