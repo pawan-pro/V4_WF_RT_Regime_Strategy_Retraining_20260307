@@ -18,9 +18,9 @@ ALPACA_KEY    = "PKBPXGRUOI6AQB43ENROLTREJX"   # Paper trading account
 ALPACA_SECRET = "Dtw5J51BMZrWpgHg1auvxnpazjPcwi6sXg34V4FprNcQ"  # ← confirm this is correct for paper account
 PAPER         = True
 
-SIGNAL_TABLE  = "pawan_quant_research_1.default.bronze_rt_regime_signal"
-MARKET_TABLE  = "pawan_quant_research_1.default.bronze_rt_market_1h"
-TARGET_TABLE  = "pawan_quant_research_1.default.bronze_rt_paper_trade_log"
+SIGNAL_TABLE  = "pawan_quant_research_1.v4.bronze_rt_regime_signal"
+MARKET_TABLE  = "pawan_quant_research_1.v4.bronze_rt_market_1h"
+TARGET_TABLE  = "pawan_quant_research_1.v4.bronze_rt_paper_trade_log"
 
 # Regime → ETF mapping
 REGIME_TICKER = {0: "QQQ", 1: "SPY", 2: None}  # None = CASH (close all)

@@ -12,7 +12,7 @@ from pyspark.sql.window import Window
 VIX_SOURCE = "fred_1d"   # "portara_1h" | "fred_1d"
 
 # 1. Dynamically get the latest timestamp from the Market Bronze Table
-max_ts_row = spark.sql('SELECT MAX(timestamp) as max_ts FROM pawan_quant_research_1.default.bronze_bt_market_1h').collect()[0]
+max_ts_row = spark.sql('SELECT MAX(timestamp) as max_ts FROM pawan_quant_research_1.v4.bronze_bt_market_1h').collect()[0]
 end_date = max_ts_row["max_ts"]
 start_date = "2016-01-01 00:00:00"
 
@@ -25,11 +25,11 @@ backbone = spark.range(0, 15 * 365 * 24) \
     .select("timestamp")
 
 # 3. Load and Deduplicate Bronze Data
-macro_df    = spark.table("pawan_quant_research_1.default.bronze_bt_macro_events").dropDuplicates(["timestamp", "indicator_id"])
-market_df   = spark.table("pawan_quant_research_1.default.bronze_bt_market_1h").filter(F.col("symbol") == "SPY").dropDuplicates(["timestamp"])
-qqq_df      = spark.table("pawan_quant_research_1.default.bronze_bt_market_1h").filter(F.col("symbol") == "QQQ").dropDuplicates(["timestamp"])
-vix3m_df    = spark.table("pawan_quant_research_1.default.bronze_bt_vix3m_1h").dropDuplicates(["timestamp"])
-vix_spot_df = spark.table("pawan_quant_research_1.default.bronze_bt_vix_1h").dropDuplicates(["timestamp"])
+macro_df    = spark.table("pawan_quant_research_1.v4.bronze_bt_macro_events").dropDuplicates(["timestamp", "indicator_id"])
+market_df   = spark.table("pawan_quant_research_1.v4.bronze_bt_market_1h").filter(F.col("symbol") == "SPY").dropDuplicates(["timestamp"])
+qqq_df      = spark.table("pawan_quant_research_1.v4.bronze_bt_market_1h").filter(F.col("symbol") == "QQQ").dropDuplicates(["timestamp"])
+vix3m_df    = spark.table("pawan_quant_research_1.v4.bronze_bt_vix3m_1h").dropDuplicates(["timestamp"])
+vix_spot_df = spark.table("pawan_quant_research_1.v4.bronze_bt_vix_1h").dropDuplicates(["timestamp"])
 
 # 4. VIX3M Lag — conditional on source
 # portara_1h: column is "vix3m", no PIT at ingestion → apply 1-day shift here
@@ -120,7 +120,7 @@ final_silver = silver_grid.select(
     .mode("overwrite")
     .option("overwriteSchema", "true")
     .format("delta")
-    .saveAsTable("pawan_quant_research_1.default.silver_bt_master_grid_1h"))
+    .saveAsTable("pawan_quant_research_1.v4.silver_bt_master_grid_1h"))
 
 print(f"✅ SUCCESS: silver_bt_master_grid_1h created | VIX_SOURCE={VIX_SOURCE}")
 
@@ -131,7 +131,7 @@ print(f"✅ SUCCESS: silver_bt_master_grid_1h created | VIX_SOURCE={VIX_SOURCE}"
 print("📊 First 10 rows (HEAD):")
 head_df = spark.sql("""
     SELECT * 
-    FROM pawan_quant_research_1.default.silver_bt_master_grid_1h
+    FROM pawan_quant_research_1.v4.silver_bt_master_grid_1h
     ORDER BY timestamp ASC
     LIMIT 10
 """)
@@ -141,7 +141,7 @@ display(head_df)
 print("\n📊 Last 10 rows (TAIL):")
 tail_df = spark.sql("""
     SELECT * 
-    FROM pawan_quant_research_1.default.silver_bt_master_grid_1h
+    FROM pawan_quant_research_1.v4.silver_bt_master_grid_1h
     ORDER BY timestamp DESC
     LIMIT 10
 """)
@@ -161,13 +161,13 @@ summary_df = spark.sql("""
         ROUND(AVG(VIX_Inversion_Z), 4) as avg_vix_inversion_z,
         COUNT(CASE WHEN CPIAUCSL_z IS NOT NULL THEN 1 END) as cpi_records,
         COUNT(CASE WHEN PAYEMS_z IS NOT NULL THEN 1 END) as payems_records
-    FROM pawan_quant_research_1.default.silver_bt_master_grid_1h
+    FROM pawan_quant_research_1.v4.silver_bt_master_grid_1h
 """)
 display(summary_df)
 
 # COMMAND ----------
 
-df = spark.table("pawan_quant_research_1.default.silver_bt_master_grid_1h").filter(
+df = spark.table("pawan_quant_research_1.v4.silver_bt_master_grid_1h").filter(
     (F.col("timestamp") >= "2024-03-01") &
     (F.col("timestamp") <= "2024-04-30")
 )
@@ -182,13 +182,13 @@ spark.sql("""
         COUNT(*) as total_rows,
         COUNT(CASE WHEN CPIAUCSL_z IS NOT NULL THEN 1 END) as rows_with_cpi,
         COUNT(CASE WHEN SPY_close IS NOT NULL THEN 1 END) as rows_with_spy
-    FROM pawan_quant_research_1.default.silver_bt_master_grid_1h
+    FROM pawan_quant_research_1.v4.silver_bt_master_grid_1h
 """).show()
 
 # COMMAND ----------
 
 spark.sql("""
     SELECT DISTINCT symbol, COUNT(*) as rows 
-    FROM pawan_quant_research_1.default.bronze_bt_vix3m_1h 
+    FROM pawan_quant_research_1.v4.bronze_bt_vix3m_1h 
     GROUP BY symbol
 """).show()

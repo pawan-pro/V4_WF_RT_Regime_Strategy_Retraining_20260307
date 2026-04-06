@@ -10,7 +10,7 @@
 # MAGIC - Show current regime state as of latest data
 # MAGIC
 # MAGIC Assumes:
-# MAGIC - Signal file exists: `/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_regime_signals-v4.csv`
+# MAGIC - Signal file exists: `/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_regime_signals-v4.csv`
 # MAGIC   (or adjust path if using portara_1h version)
 # MAGIC - Model file exists (optional for importance): same volume
 
@@ -36,8 +36,8 @@ pd.set_option('display.float_format', '{:,.4f}'.format)
 # Cell 2 - Installs & Imports
 
 # Adjust path if you're using the portara version
-SIGNAL_PATH = "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_regime_signals-v4.csv"
-# SIGNAL_PATH = "/Volumes/pawan_quant_research_1/default/market_data/bt_portara_1h_regime_signals-v4.csv"
+SIGNAL_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_regime_signals-v4.csv"
+# SIGNAL_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/bt_portara_1h_regime_signals-v4.csv"
 
 df = pd.read_csv(SIGNAL_PATH, index_col="timestamp", parse_dates=True)
 df.index = df.index.tz_localize(None)  # make naive UTC
@@ -55,8 +55,8 @@ print(df["regime_name"].value_counts(normalize=True).round(3))
 # Cell 3 - Load the Regime Signal File
 
 # Adjust path if you're using the portara version
-SIGNAL_PATH = "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_regime_signals-v4.csv"
-# SIGNAL_PATH = "/Volumes/pawan_quant_research_1/default/market_data/bt_portara_1h_regime_signals-v4.csv"
+SIGNAL_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_regime_signals-v4.csv"
+# SIGNAL_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/bt_portara_1h_regime_signals-v4.csv"
 
 df = pd.read_csv(SIGNAL_PATH, index_col="timestamp", parse_dates=True)
 df.index = df.index.tz_localize(None)  # make naive UTC
@@ -96,8 +96,8 @@ display(features_info.style.set_caption("V4 Model Input Features"))
 
 # Cell 5 - Feature Importance
 
-MODEL_PATH = "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_xgboost_regime.joblib"
-# MODEL_PATH = "/Volumes/pawan_quant_research_1/default/market_data/bt_portara_1h_xgboost_regime.joblib"
+MODEL_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_xgboost_regime.joblib"
+# MODEL_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/bt_portara_1h_xgboost_regime.joblib"
 
 try:
     model = joblib.load(MODEL_PATH)
@@ -213,7 +213,7 @@ period_start = "2026-01-01"
 period_end = datetime.now().strftime("%Y-%m-%d %H:%M:00")  # Today: ~2026-03-04 18:07 UTC
 
 INITIAL_CAPITAL = 10000  # $10k starting account
-SIGNAL_PATH = "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_regime_signals-v4.csv"
+SIGNAL_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_regime_signals-v4.csv"
 
 # Load signals
 df = pd.read_csv(SIGNAL_PATH, index_col='timestamp', parse_dates=True)
@@ -228,7 +228,7 @@ print(df_period["regime_name"].value_counts(normalize=True).round(3))
 # COMMAND ----------
 
 # Pull hourly prices from bronze table
-market_sdf = spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")  # Use BT table for full history
+market_sdf = spark.table("pawan_quant_research_1.v4.bronze_bt_market_1h")  # Use BT table for full history
 prices_pdf = market_sdf.filter("symbol IN ('SPY', 'QQQ') AND timestamp BETWEEN '2026-01-01' AND '2026-03-05'") \
     .dropDuplicates(["timestamp", "symbol"]).toPandas()
 
@@ -423,8 +423,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-SIGNAL_PATH  = "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_regime_signals-v4.csv"
-OUTPUT_VOL   = "/Volumes/pawan_quant_research_1/default/market_data"
+SIGNAL_PATH  = "/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_regime_signals-v4.csv"
+OUTPUT_VOL   = "/Volumes/pawan_quant_research_1/v4/market_data"
 
 REGIME_MAP   = {0: "Expansion", 1: "Slowdown", 2: "Recession"}
 POSITION_MAP = {0: "100% QQQ",  1: "100% SPY",  2: "100% CASH"}

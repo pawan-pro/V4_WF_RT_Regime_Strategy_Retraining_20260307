@@ -20,9 +20,9 @@ print("Dashboard initialized")
 
 # COMMAND ----------
 
-AUDIT_TABLE = "pawan_quant_research_1.default.bronze_rt_signal_audit_log"
-TRADE_TABLE = "pawan_quant_research_1.default.rt_live_trade_log"
-SILVER_RT   = "pawan_quant_research_1.default.silver_rt_1h"
+AUDIT_TABLE = "pawan_quant_research_1.v4.bronze_rt_signal_audit_log"
+TRADE_TABLE = "pawan_quant_research_1.v4.rt_live_trade_log"
+SILVER_RT   = "pawan_quant_research_1.v4.silver_rt_1h"
 
 # COMMAND ----------
 
@@ -395,7 +395,7 @@ import joblib
 import pandas as pd
 
 # load model
-model = joblib.load("/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_xgboost_regime.joblib")
+model = joblib.load("/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_xgboost_regime.joblib")
 
 # base row
 base = spark.sql(f"""
@@ -468,7 +468,7 @@ import joblib
 import pandas as pd
 
 # load model
-model = joblib.load("/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_xgboost_regime.joblib")
+model = joblib.load("/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_xgboost_regime.joblib")
 
 # base row
 base = spark.sql(f"""
@@ -556,7 +556,7 @@ import matplotlib.pyplot as plt
 import joblib
 import pandas as pd
 
-model = joblib.load("/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_xgboost_regime.joblib")
+model = joblib.load("/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_xgboost_regime.joblib")
 
 base = spark.sql(f"""
 SELECT *

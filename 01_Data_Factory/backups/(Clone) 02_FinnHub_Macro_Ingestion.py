@@ -20,7 +20,7 @@ from pyspark.sql.types import StructType, StructField, StringType, TimestampType
 
 # --- CONFIGURATION (Unity Catalog) ---
 CATALOG = "pawan_quant_research_1"
-SCHEMA = "default"
+SCHEMA = "v4"
 VOLUME = "market_data"
 
 # Input/Output Paths
@@ -192,7 +192,7 @@ else:
 # MAGIC     MIN(timestamp) as first_release,
 # MAGIC     MAX(timestamp) as last_release,
 # MAGIC     AVG(actual) as avg_value
-# MAGIC FROM pawan_quant_research_1.default.bronze_macro_events
+# MAGIC FROM pawan_quant_research_1.v4.bronze_macro_events
 # MAGIC GROUP BY indicator_id
 # MAGIC ORDER BY total_verified_releases DESC;
 
@@ -272,7 +272,7 @@ from datetime import datetime
 import finnhub
 
 # --- CONFIG ---
-RAW_CSV_PATH = "/Volumes/pawan_quant_research_1/default/market_data/raw_finnhub_haystack.csv"
+RAW_CSV_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/raw_finnhub_haystack.csv"
 START_YEAR = 2015
 END_YEAR = 2025 # Pulling up to current date
 
@@ -343,8 +343,8 @@ else:
 import pandas as pd
 
 # Read the CSV
-input_path = "/Volumes/pawan_quant_research_1/default/market_data/raw_finnhub_haystack.csv"
-output_path = "/Volumes/pawan_quant_research_1/default/market_data/filtered_economic_indicators.csv"
+input_path = "/Volumes/pawan_quant_research_1/v4/market_data/raw_finnhub_haystack.csv"
+output_path = "/Volumes/pawan_quant_research_1/v4/market_data/filtered_economic_indicators.csv"
 
 df = pd.read_csv(input_path)
 
@@ -442,8 +442,8 @@ import os
 FRED_API_KEY = "f52bdf7341f23d0458820ecd806178db" 
 fred = Fred(api_key=FRED_API_KEY)
 
-INPUT_PATH = "/Volumes/pawan_quant_research_1/default/market_data/filtered_economic_indicators.csv"
-OUTPUT_PATH = "/Volumes/pawan_quant_research_1/default/market_data/economic_release_timeline_final.csv"
+INPUT_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/filtered_economic_indicators.csv"
+OUTPUT_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/economic_release_timeline_final.csv"
 
 # Comprehensive Map handling all variations found in your CSV audit
 EVENT_TO_FRED = {
@@ -586,9 +586,9 @@ import time
 FRED_API_KEY = "f52bdf7341f23d0458820ecd806178db" 
 fred = Fred(api_key=FRED_API_KEY)
 
-INPUT_PATH = "/Volumes/pawan_quant_research_1/default/market_data/filtered_economic_indicators.csv"
-OUTPUT_PATH = "/Volumes/pawan_quant_research_1/default/market_data/economic_release_timeline_final.csv"
-UNMAPPED_PATH = "/Volumes/pawan_quant_research_1/default/market_data/unmapped_events.csv"
+INPUT_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/filtered_economic_indicators.csv"
+OUTPUT_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/economic_release_timeline_final.csv"
+UNMAPPED_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/unmapped_events.csv"
 
 # Comprehensive event mapping
 EVENT_TO_FRED = {
@@ -872,8 +872,8 @@ import pandas as pd
 import numpy as np
 
 # 1. Define Paths
-input_path = "/Volumes/pawan_quant_research_1/default/market_data/filtered_economic_indicators.csv"
-output_path = "/Volumes/pawan_quant_research_1/default/market_data/economic_indicators_with_revisions.csv"
+input_path = "/Volumes/pawan_quant_research_1/v4/market_data/filtered_economic_indicators.csv"
+output_path = "/Volumes/pawan_quant_research_1/v4/market_data/economic_indicators_with_revisions.csv"
 
 # 2. Load the data
 df = pd.read_csv(input_path)
@@ -926,7 +926,7 @@ import pandas as pd
 import os
 
 # Read the CSV file
-input_file = "/Volumes/pawan_quant_research_1/default/market_data/filtered_economic_indicators.csv"
+input_file = "/Volumes/pawan_quant_research_1/v4/market_data/filtered_economic_indicators.csv"
 df = pd.read_csv(input_file)
 
 # Define mappings of series IDs to their corresponding event names
@@ -987,7 +987,7 @@ series_mappings = {
 }
 
 # Create output directory
-output_dir = "/Volumes/pawan_quant_research_1/default/market_data/individual_series"
+output_dir = "/Volumes/pawan_quant_research_1/v4/market_data/individual_series"
 os.makedirs(output_dir, exist_ok=True)
 
 # Create separate CSV for each series
@@ -1040,7 +1040,7 @@ FRED_API_KEY = "f52bdf7341f23d0458820ecd806178db"
 ALFRED_BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
 
 # Load release schedule metadata
-with open('/Volumes/pawan_quant_research_1/default/market_data/release_schedule_report.json', 'r') as f:
+with open('/Volumes/pawan_quant_research_1/v4/market_data/release_schedule_report.json', 'r') as f:
     RELEASE_SCHEDULES = json.load(f)
 
 
@@ -1368,7 +1368,7 @@ series_list = ['PAYEMS', 'UNRATE', 'CPIAUCSL', 'PCEPI', 'GDPC1', 'INDPRO', 'PCE'
 datasets = create_event_study_dataset(
     series_list=series_list,
     start_date='2015-01-01',  # or your preferred start date
-    output_file='/Volumes/pawan_quant_research_1/default/market_data/first_releases.csv'
+    output_file='/Volumes/pawan_quant_research_1/v4/market_data/first_releases.csv'
 )
 
 # This creates:
@@ -1693,7 +1693,7 @@ datasets = create_event_study_dataset(
 # MAGIC
 # MAGIC # Read PAYEMS
 # MAGIC payems = spark.read.csv(
-# MAGIC     '/Volumes/pawan_quant_research_1/default/market_data/first_releases_PAYEMS.csv',
+# MAGIC     '/Volumes/pawan_quant_research_1/v4/market_data/first_releases_PAYEMS.csv',
 # MAGIC     header=True,
 # MAGIC     inferSchema=True
 # MAGIC )
@@ -1725,7 +1725,7 @@ datasets = create_event_study_dataset(
 # MAGIC dfs = []
 # MAGIC for indicator in indicators:
 # MAGIC     df = spark.read.csv(
-# MAGIC         f'/Volumes/pawan_quant_research_1/default/market_data/first_releases_{indicator}.csv',
+# MAGIC         f'/Volumes/pawan_quant_research_1/v4/market_data/first_releases_{indicator}.csv',
 # MAGIC         header=True,
 # MAGIC         inferSchema=True
 # MAGIC     )
@@ -1782,7 +1782,7 @@ datasets = create_event_study_dataset(
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC /Volumes/pawan_quant_research_1/default/market_data/first_releases_INDPRO.csv.  
+# MAGIC /Volumes/pawan_quant_research_1/v4/market_data/first_releases_INDPRO.csv.  
 
 # COMMAND ----------
 
@@ -1790,7 +1790,7 @@ datasets = create_event_study_dataset(
 from pyspark.sql import functions as F
 
 # Define the CSV files to analyze
-base_path = "/Volumes/pawan_quant_research_1/default/market_data"
+base_path = "/Volumes/pawan_quant_research_1/v4/market_data"
 indicators = ['CPIAUCSL', 'GDPC1', 'INDPRO', 'PAYEMS', 'PCE', 'PCEPI', 'UMCSENT', 'UNRATE']
 
 print("="*100)

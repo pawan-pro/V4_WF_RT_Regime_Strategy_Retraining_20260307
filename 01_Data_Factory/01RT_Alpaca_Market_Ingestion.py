@@ -25,7 +25,7 @@ import time
 
 # --- CONFIGURATION ---
 CATALOG     = "pawan_quant_research_1"
-SCHEMA      = "default"
+SCHEMA      = "v4"
 VOLUME      = "market_data"
 BT_PREFIX   = "bt"
 
@@ -171,7 +171,7 @@ print("🚀 VIEW CREATED: ALL HOURLY DATA IS LEGIT AND LINKED.")
 # MAGIC %sql
 # MAGIC -- Quick count to verify the table
 # MAGIC SELECT symbol, COUNT(*) as total_rows
-# MAGIC FROM pawan_quant_research_1.default.bronze_bt_market_1h
+# MAGIC FROM pawan_quant_research_1.v4.bronze_bt_market_1h
 # MAGIC GROUP BY symbol;
 
 # COMMAND ----------
@@ -189,7 +189,7 @@ print("🚀 VIEW CREATED: ALL HOURLY DATA IS LEGIT AND LINKED.")
 # MAGIC   COUNT(*) as total_hours,
 # MAGIC   COUNT(DISTINCT(TO_DATE(timestamp))) as trading_days,
 # MAGIC   ROUND(COUNT(*) / COUNT(DISTINCT(TO_DATE(timestamp))), 1) as avg_bars_per_day
-# MAGIC FROM pawan_quant_research_1.default.bronze_bt_market_1h
+# MAGIC FROM pawan_quant_research_1.v4.bronze_bt_market_1h
 # MAGIC GROUP BY 1, 2
 # MAGIC ORDER BY 1, 2
 
@@ -202,7 +202,7 @@ head_df = spark.sql("""
     WITH ranked AS (
         SELECT *,
                ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY timestamp ASC) as rn
-        FROM pawan_quant_research_1.default.bronze_bt_market_1h
+        FROM pawan_quant_research_1.v4.bronze_bt_market_1h
     )
     SELECT symbol, timestamp, open, high, low, close, volume, trade_count, vwap, year_partition
     FROM ranked
@@ -217,7 +217,7 @@ tail_df = spark.sql("""
     WITH ranked AS (
         SELECT *,
                ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY timestamp DESC) as rn
-        FROM pawan_quant_research_1.default.bronze_bt_market_1h
+        FROM pawan_quant_research_1.v4.bronze_bt_market_1h
     )
     SELECT symbol, timestamp, open, high, low, close, volume, trade_count, vwap, year_partition
     FROM ranked
@@ -245,7 +245,7 @@ summary_df = spark.sql("""
         ROUND(AVG(close), 2) as avg_close,
         ROUND(SUM(volume), 0) as total_volume,
         ROUND(AVG(volume), 0) as avg_volume
-    FROM pawan_quant_research_1.default.bronze_bt_market_1h
+    FROM pawan_quant_research_1.v4.bronze_bt_market_1h
     GROUP BY symbol
     ORDER BY symbol ASC
 """)
@@ -266,20 +266,19 @@ for row in summary_df.collect():
 
 etf_df = spark.sql("""
     SELECT *
-    FROM pawan_quant_research_1.default.bronze_bt_market_1h
+    FROM pawan_quant_research_1.v4.bronze_bt_market_1h
     WHERE timestamp >= '2024-03-01'
       AND timestamp <= '2024-04-30'
 """)
 
 etf_df.coalesce(1).write.option("header", True).mode("overwrite").csv(
-    "/Volumes/pawan_quant_research_1/default/market_data/raw_etf_prices_2024-03-01_to_2024-04-30.csv"
+    "/Volumes/pawan_quant_research_1/v4/market_data/raw_etf_prices_2024-03-01_to_2024-04-30.csv"
 )
 
 # COMMAND ----------
 
 df = spark.read.format("csv").option("header", True).load(
-    "/Volumes/pawan_quant_research_1/default/market_data/raw_etf_prices_2024-03-01_to_2024-04-30.csv"
+    "/Volumes/pawan_quant_research_1/v4/market_data/raw_etf_prices_2024-03-01_to_2024-04-30.csv"
 )
 display(df)
-
 

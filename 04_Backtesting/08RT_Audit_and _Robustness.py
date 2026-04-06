@@ -9,8 +9,8 @@ from pyspark.sql import functions as F
 
 # 1. Pick a major known release (e.g., Non-Farm Payrolls on a specific date)
 # We look for the moment NFP_Shock was non-zero
-#audit_df = spark.table("pawan_quant_research_1.default.silver_bt_master_grid_1h") \
-audit_df = spark.table("pawan_quant_research_1.default.silver_bt_master_grid_1h") \
+#audit_df = spark.table("pawan_quant_research_1.v4.silver_bt_master_grid_1h") \
+audit_df = spark.table("pawan_quant_research_1.v4.silver_bt_master_grid_1h") \
     .filter("timestamp BETWEEN '2023-10-06 11:00:00' AND '2023-10-06 15:00:00'") \
     .sort("timestamp").toPandas()
 
@@ -31,7 +31,7 @@ print(audit_df[['timestamp', 'PAYEMS_z', 'NFP_Event_Active', 'SPY_close']])
 # COMMAND ----------
 
 # Check if the signal file has any timestamps out of order
-signal_path = "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_regime_signals-v4.csv"
+signal_path = "/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_regime_signals-v4.csv"
 signals = pd.read_csv(signal_path)
 is_sorted = all(signals['timestamp'] == signals['timestamp'].sort_values())
 
@@ -76,7 +76,7 @@ plt.show()
 # --- PRE-FLIGHT: ATTACH PRICES TO AUDIT DATAFRAME ---
 
 # 1. Load QQQ prices from the Bronze Market table
-qqq_prices_sdf = spark.table("pawan_quant_research_1.default.bronze_bt_market_1h") \
+qqq_prices_sdf = spark.table("pawan_quant_research_1.v4.bronze_bt_market_1h") \
     .filter("symbol = 'QQQ'") \
     .select(F.col("timestamp"), F.col("close").alias("QQQ_price"))
 
@@ -144,7 +144,7 @@ print(f"Stressed CAGR (15bps cost): {stressed_cagr:.2%}")
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SELECT * FROM pawan_quant_research_1.default.bronze_bt_macro_events 
+# MAGIC SELECT * FROM pawan_quant_research_1.v4.bronze_bt_macro_events 
 # MAGIC WHERE indicator_id = 'PAYEMS' 
 # MAGIC AND date(timestamp) = '2023-10-06'
 
@@ -153,7 +153,7 @@ print(f"Stressed CAGR (15bps cost): {stressed_cagr:.2%}")
 # MAGIC %sql
 # MAGIC SELECT * 
 # MAGIC FROM read_files(
-# MAGIC   '/Volumes/pawan_quant_research_1/default/market_data/raw_finnhub_haystack.csv',
+# MAGIC   '/Volumes/pawan_quant_research_1/v4/market_data/raw_finnhub_haystack.csv',
 # MAGIC   format => 'csv',
 # MAGIC   header => true
 # MAGIC )
@@ -166,7 +166,7 @@ print(f"Stressed CAGR (15bps cost): {stressed_cagr:.2%}")
 # We pick a day with a clear market move (e.g., a post-CPI market open)
 # We expect the 'Price_Mom_24H' and 'T10Y2Y' (Yield Curve) to update in the SAME bar.
 
-check_df = spark.table("pawan_quant_research_1.default.silver_bt_master_grid_1h") \
+check_df = spark.table("pawan_quant_research_1.v4.silver_bt_master_grid_1h") \
     .filter("timestamp BETWEEN '2024-03-12 12:00:00' AND '2024-03-12 18:00:00'") \
     .select("timestamp", "SPY_close", "Price_Mom_24H", "vix3m_z", "VIX_Inversion_Z") \
     .sort("timestamp").toPandas()
@@ -182,7 +182,7 @@ print(check_df)
 
 # --- VIX3M LEAKAGE DIAGNOSTIC ---
 # Compare VIXCLS (Hourly) with VIX3M (Daily)
-diag_df = spark.table("pawan_quant_research_1.default.silver_bt_master_grid_1h") \
+diag_df = spark.table("pawan_quant_research_1.v4.silver_bt_master_grid_1h") \
     .filter("timestamp BETWEEN '2024-03-11 20:00:00' AND '2024-03-12 10:00:00'") \
     .select("timestamp", "VIXCLS_z", "vix3m_z") \
     .sort("timestamp").toPandas()
@@ -203,7 +203,7 @@ print(diag_df)
 
 # --- MACRO RELEASE HOUR-ZERO AUDIT ---
 # Picking a known CPI date: 2024-02-13 (Released at 13:30 UTC due to Winter DST)
-macro_diag = spark.table("pawan_quant_research_1.default.silver_bt_master_grid_1h") \
+macro_diag = spark.table("pawan_quant_research_1.v4.silver_bt_master_grid_1h") \
     .filter("timestamp BETWEEN '2024-02-13 11:00:00' AND '2024-02-13 16:00:00'") \
     .select("timestamp", "CPIAUCSL_z", "CPI_Event_Active", "SPY_close") \
     .sort("timestamp").toPandas()
@@ -225,7 +225,7 @@ print(macro_diag)
 
 # --- INTEREST RATE SYNC AUDIT ---
 # Check the transition at Midnight UTC to see if Yield Curve Z-scores "predict" the open
-rate_diag = spark.table("pawan_quant_research_1.default.silver_bt_master_grid_1h") \
+rate_diag = spark.table("pawan_quant_research_1.v4.silver_bt_master_grid_1h") \
     .filter("timestamp BETWEEN '2024-03-11 20:00:00' AND '2024-03-12 10:00:00'") \
     .select("timestamp", "INDPRO_z", "GDPC1_z") \
     .sort("timestamp").toPandas()
@@ -246,7 +246,7 @@ print(rate_diag)
 # COMMAND ----------
 
 # --- MOMENTUM PEAKING AUDIT ---
-mom_diag = spark.table("pawan_quant_research_1.default.silver_bt_master_grid_1h") \
+mom_diag = spark.table("pawan_quant_research_1.v4.silver_bt_master_grid_1h") \
     .filter("timestamp BETWEEN '2024-03-12 13:00:00' AND '2024-03-12 15:00:00'") \
     .select("timestamp", "SPY_close", "Price_Mom_24H") \
     .sort("timestamp").toPandas()
@@ -273,7 +273,7 @@ print(f"Momentum Change in bar: {mom_diff:.4%}")
 # COMMAND ----------
 
 # --- WEEKEND FROZEN CLOCK AUDIT ---
-weekend_diag = spark.table("pawan_quant_research_1.default.silver_bt_master_grid_1h") \
+weekend_diag = spark.table("pawan_quant_research_1.v4.silver_bt_master_grid_1h") \
     .filter("timestamp BETWEEN '2024-03-09 00:00:00' AND '2024-03-10 23:00:00'") \
     .select("timestamp", "SPY_close", "VIXCLS_z", "UNRATE_z") \
     .sort("timestamp").toPandas()

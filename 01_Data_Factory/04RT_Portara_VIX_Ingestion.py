@@ -41,7 +41,7 @@ from pyspark.sql.types import *
 # CONFIGURATION — only edit here
 # ─────────────────────────────────────────────
 CATALOG    = "pawan_quant_research_1"
-SCHEMA     = "default"
+SCHEMA     = "v4"
 BT_PREFIX  = "bt"
 VIX_SOURCE = "fred_1d"   # OPTIONS: "portara_1h" | "fred_1d"
 
@@ -254,7 +254,7 @@ else:
 spark.sql("""
     SELECT symbol, COUNT(*) as rows,
            MIN(timestamp) as first, MAX(timestamp) as last
-    FROM pawan_quant_research_1.default.bronze_bt_vix3m_1h
+    FROM pawan_quant_research_1.v4.bronze_bt_vix3m_1h
     GROUP BY symbol
 """).show()
 

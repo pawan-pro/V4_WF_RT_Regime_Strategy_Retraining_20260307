@@ -13,7 +13,7 @@
 ```python
 # Config
 CATALOG = "pawan_quant_research_1"
-SCHEMA  = "default"
+SCHEMA  = "v4"
 VOLUME  = "market_data"
 ```
 
@@ -111,7 +111,7 @@ Writes PowerBI-ready Delta tables:
 - Position history
 - P&L tracking (if live)
 
-**Output:** `gold_rt_dashboard`
+**Output:** `gold_rt_dashboard_feed`
 
 ---
 

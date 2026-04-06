@@ -26,12 +26,12 @@ from pyspark.sql import functions as F
 # ------------------------------------------------------------
 
 CATALOG = "pawan_quant_research_1"
-SCHEMA = "default"
+SCHEMA = "v4"
 
 SILVER_TABLE = f"{CATALOG}.{SCHEMA}.silver_bt_master_grid_1h"
 SIGNAL_TABLE = f"{CATALOG}.{SCHEMA}.bt_walkforward_regime_signals"
 
-LABEL_PATH = "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_regime_signals-v4.csv"
+LABEL_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_regime_signals-v4.csv"
 
 TRAIN_START = "2016-01-01"
 LIVE_START = "2021-01-01"
@@ -316,7 +316,7 @@ print("Signals saved:", SIGNAL_TABLE)
 # ------------------------------------------------------------
 
 prices = spark.table(
-    "pawan_quant_research_1.default.bronze_bt_market_1h"
+    "pawan_quant_research_1.v4.bronze_bt_market_1h"
 ).filter(
     "symbol IN ('SPY','QQQ')"
 ).toPandas()
@@ -423,7 +423,7 @@ wf_nav = wf_nav.rename(columns={"portfolio":"WF_Value"})
 # LOAD V4 SIGNAL FILE
 # ------------------------------------------------------------
 
-V4_SIGNAL_PATH = "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_regime_signals-v4.csv"
+V4_SIGNAL_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_regime_signals-v4.csv"
 
 v4 = pd.read_csv(V4_SIGNAL_PATH, parse_dates=["timestamp"])
 
@@ -435,7 +435,7 @@ v4 = v4.set_index("timestamp")
 # ------------------------------------------------------------
 
 prices = spark.table(
-"pawan_quant_research_1.default.bronze_bt_market_1h"
+"pawan_quant_research_1.v4.bronze_bt_market_1h"
 ).filter(
 "symbol IN ('SPY','QQQ')"
 ).toPandas()
@@ -751,7 +751,7 @@ display(daily_returns.head())
 # EXPORT CSVs
 # ------------------------------------------------------------
 
-EXPORT_PATH = "/Volumes/pawan_quant_research_1/default/market_data"
+EXPORT_PATH = "/Volumes/pawan_quant_research_1/v4/market_data"
 
 daily_returns.to_csv(f"{EXPORT_PATH}/strategy_daily_returns.csv")
 weekly_returns.to_csv(f"{EXPORT_PATH}/strategy_weekly_returns.csv")
@@ -1214,7 +1214,7 @@ v4_wf = v4_wf.loc[START_DATE:]
 
 # ---- V4 ORIGINAL
 v4_orig = pd.read_csv(
-    "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_regime_signals-v4.csv",
+    "/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_regime_signals-v4.csv",
     parse_dates=["timestamp"]
 )
 
@@ -1393,7 +1393,7 @@ display(yearly_returns)
 # EXPORT RETURNS
 # ------------------------------------------------------------
 
-EXPORT_PATH="/Volumes/pawan_quant_research_1/default/market_data"
+EXPORT_PATH="/Volumes/pawan_quant_research_1/v4/market_data"
 
 daily_returns.to_csv(f"{EXPORT_PATH}/daily_returns_all_models.csv")
 weekly_returns.to_csv(f"{EXPORT_PATH}/weekly_returns_all_models.csv")
@@ -1424,4 +1424,3 @@ plt.legend()
 plt.show()
 
 # COMMAND ----------
-

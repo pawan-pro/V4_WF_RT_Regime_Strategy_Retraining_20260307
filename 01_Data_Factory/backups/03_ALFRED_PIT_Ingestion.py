@@ -3,8 +3,8 @@ import pandas as pd
 import numpy as np
 
 # 1. Define Paths
-input_path = "/Volumes/pawan_quant_research_1/default/market_data/filtered_economic_indicators.csv"
-output_path = "/Volumes/pawan_quant_research_1/default/market_data/economic_indicators_with_revisions.csv"
+input_path = "/Volumes/pawan_quant_research_1/v4/market_data/filtered_economic_indicators.csv"
+output_path = "/Volumes/pawan_quant_research_1/v4/market_data/economic_indicators_with_revisions.csv"
 
 # 2. Load the data
 df = pd.read_csv(input_path)

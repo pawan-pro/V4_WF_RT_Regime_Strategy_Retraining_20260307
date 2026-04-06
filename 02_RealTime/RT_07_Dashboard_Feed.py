@@ -4,12 +4,12 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import *
 from datetime import datetime, timezone
 
-SIGNAL_TABLE = "pawan_quant_research_1.default.bronze_rt_regime_signal"
-SILVER_RT    = "pawan_quant_research_1.default.silver_rt_1h"
-TRADE_LOG    = "pawan_quant_research_1.default.bronze_rt_paper_trade_log"
-AUDIT_LOG    = "pawan_quant_research_1.default.bronze_rt_signal_audit_log"
-MARKET_TABLE = "pawan_quant_research_1.default.bronze_rt_market_1h"
-TARGET_TABLE = "pawan_quant_research_1.default.gold_rt_dashboard_feed"
+SIGNAL_TABLE = "pawan_quant_research_1.v4.bronze_rt_regime_signal"
+SILVER_RT    = "pawan_quant_research_1.v4.silver_rt_1h"
+TRADE_LOG    = "pawan_quant_research_1.v4.bronze_rt_paper_trade_log"
+AUDIT_LOG    = "pawan_quant_research_1.v4.bronze_rt_signal_audit_log"
+MARKET_TABLE = "pawan_quant_research_1.v4.bronze_rt_market_1h"
+TARGET_TABLE = "pawan_quant_research_1.v4.gold_rt_dashboard_feed"
 
 # STEP 1: Latest signal
 signal = spark.sql(f"""
@@ -105,7 +105,8 @@ dashboard_row = {
     "vix3m_z":         float(signal["vix3m_z"]),
     "VIX_Inversion_Z": float(silver["VIX_Inversion_Z"] or 0),
     "CPIAUCSL_z":      float(signal["CPIAUCSL_z"]),
-    "PAYEMS_z":        float(signal["UNRATE_z"]),
+    # Carry the payroll signal through to the dashboard feed.
+    "PAYEMS_z":        float(signal["PAYEMS_z"]),
     "Price_Mom_24H":   float(silver["Price_Mom_24H"] or 0),
     "SPY_close":       price_map.get("SPY"),
     "QQQ_close":       price_map.get("QQQ"),
@@ -170,4 +171,3 @@ print(f"{'='*55}")
 spark.sql(f"SELECT * FROM {TARGET_TABLE}").show(vertical=True)
 
 # COMMAND ----------
-

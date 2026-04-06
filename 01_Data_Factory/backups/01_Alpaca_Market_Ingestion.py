@@ -12,7 +12,7 @@ import time
 
 # 1. PATHS (Verified from your Catalog Explorer screenshot)
 CATALOG = "pawan_quant_research_1"
-SCHEMA = "default"
+SCHEMA = "v4"
 VOLUME = "market_data"
 VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}/bronze_market_1m"
 TABLE_NAME = f"{CATALOG}.{SCHEMA}.bronze_market_1m"
@@ -89,7 +89,7 @@ import calendar
 # ============================================================================
 # ✅ Standardized variable names to prevent NameErrors
 CATALOG = "pawan_quant_research_1"
-SCHEMA = "default"
+SCHEMA = "v4"
 VOLUME = "market_data"
 
 # Direct Volume Path for high-speed writes (Standard for Unity Catalog Volumes)
@@ -119,7 +119,7 @@ print(f"   Date Range:   {START_YEAR} to {END_YEAR}")
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SHOW VOLUMES IN pawan_quant_research_1.default
+# MAGIC SHOW VOLUMES IN pawan_quant_research_1.v4
 
 # COMMAND ----------
 
@@ -269,19 +269,19 @@ def get_loaded_months(table_path):
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC CREATE VOLUME IF NOT EXISTS pawan_quant_research_1.default.market_data
+# MAGIC CREATE VOLUME IF NOT EXISTS pawan_quant_research_1.v4.market_data
 # MAGIC COMMENT 'Storage volume for ETF and credit spread minute-level data';
 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC CREATE VOLUME IF NOT EXISTS pawan_quant_research_1.default.market_data
+# MAGIC CREATE VOLUME IF NOT EXISTS pawan_quant_research_1.v4.market_data
 # MAGIC COMMENT 'Storage volume for ETF and credit spread minute-level data';
 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SHOW VOLUMES IN pawan_quant_research_1.default
+# MAGIC SHOW VOLUMES IN pawan_quant_research_1.v4
 
 # COMMAND ----------
 
@@ -447,10 +447,10 @@ print(f"📊 Total rows ingested this run: {total_rows_ingested:,}")
 # MAGIC CREATE CATALOG IF NOT EXISTS pawan_quant_research_1;
 # MAGIC
 # MAGIC -- Create the schema
-# MAGIC CREATE SCHEMA IF NOT EXISTS pawan_quant_research_1.default;
+# MAGIC CREATE SCHEMA IF NOT EXISTS pawan_quant_research_1.v4;
 # MAGIC
 # MAGIC -- Create the volume (where the raw files live)
-# MAGIC CREATE VOLUME IF NOT EXISTS pawan_quant_research_1.default.market_data;
+# MAGIC CREATE VOLUME IF NOT EXISTS pawan_quant_research_1.v4.market_data;
 
 # COMMAND ----------
 

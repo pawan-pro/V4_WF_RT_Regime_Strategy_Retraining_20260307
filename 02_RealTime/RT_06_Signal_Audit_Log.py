@@ -4,10 +4,10 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import *
 from datetime import datetime, timezone, date
 
-SIGNAL_TABLE = "pawan_quant_research_1.default.bronze_rt_regime_signal"
-SILVER_RT    = "pawan_quant_research_1.default.silver_rt_1h"
-TRADE_LOG    = "pawan_quant_research_1.default.bronze_rt_paper_trade_log"
-TARGET_TABLE = "pawan_quant_research_1.default.bronze_rt_signal_audit_log"
+SIGNAL_TABLE = "pawan_quant_research_1.v4.bronze_rt_regime_signal"
+SILVER_RT    = "pawan_quant_research_1.v4.silver_rt_1h"
+TRADE_LOG    = "pawan_quant_research_1.v4.bronze_rt_paper_trade_log"
+TARGET_TABLE = "pawan_quant_research_1.v4.bronze_rt_signal_audit_log"
 
 # Add ingestion_ts column if missing (ACL clusters block auto-merge)
 try:
@@ -38,7 +38,7 @@ trade = spark.sql(f"""
 # STEP 4: PIT lag computation
 vix_source_date = spark.sql("""
     SELECT CAST(MAX(timestamp) AS DATE) as vix_date
-    FROM pawan_quant_research_1.default.bronze_rt_vix_1d
+    FROM pawan_quant_research_1.v4.bronze_rt_vix_1d
     WHERE series = 'VIXCLS'
 """).collect()[0]["vix_date"]
 

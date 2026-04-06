@@ -9,10 +9,10 @@ import pandas as pd
 import numpy as np
 from datetime import date
 
-TARGET_TABLE  = "pawan_quant_research_1.default.silver_rt_1h"
-SILVER_HIST   = "pawan_quant_research_1.default.silver_bt_master_grid_1h"
-BRONZE_MARKET = "pawan_quant_research_1.default.bronze_rt_market_1h"
-BRONZE_VIX    = "pawan_quant_research_1.default.bronze_rt_vix_1d"
+TARGET_TABLE  = "pawan_quant_research_1.v4.silver_rt_1h"
+SILVER_HIST   = "pawan_quant_research_1.v4.silver_bt_master_grid_1h"
+BRONZE_MARKET = "pawan_quant_research_1.v4.bronze_rt_market_1h"
+BRONZE_VIX    = "pawan_quant_research_1.v4.bronze_rt_vix_1d"
 
 # ── CREATE TABLE IF NOT EXISTS ──
 spark.sql(f"""
@@ -186,7 +186,7 @@ resp = requests.post(
     headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"},
     json={
         "warehouse_id": WAREHOUSE_ID,
-        "statement": "SELECT * FROM pawan_quant_research_1.default.silver_rt_1h ORDER BY timestamp DESC LIMIT 1",
+        "statement": "SELECT * FROM pawan_quant_research_1.v4.silver_rt_1h ORDER BY timestamp DESC LIMIT 1",
         "wait_timeout": "10s"
     }
 )
@@ -221,7 +221,7 @@ FEATURES = [
 
 # Pull latest row
 row = spark.sql("""
-    SELECT * FROM pawan_quant_research_1.default.silver_rt_1h
+    SELECT * FROM pawan_quant_research_1.v4.silver_rt_1h
     ORDER BY timestamp DESC LIMIT 1
 """).toPandas().iloc[0]
 
@@ -278,28 +278,28 @@ print(f"{'='*65}\n")
 print("=== silver_rt_1h (what RT_03 wrote) ===")
 spark.sql("""
     SELECT timestamp, PAYEMS_z, VIXCLS_z, UNRATE_z, source
-    FROM pawan_quant_research_1.default.silver_rt_1h
+    FROM pawan_quant_research_1.v4.silver_rt_1h
     ORDER BY timestamp DESC LIMIT 3
 """).show(vertical=True)
 
 print("=== gold_rt_dashboard_feed (what RT_04 used) ===")
 spark.sql("""
     SELECT signal_ts, PAYEMS_z, VIXCLS_z, regime_name, source
-    FROM pawan_quant_research_1.default.gold_rt_dashboard_feed
+    FROM pawan_quant_research_1.v4.gold_rt_dashboard_feed
     ORDER BY feed_ts DESC LIMIT 3
 """).show(vertical=True)
 
 print("=== bronze_rt_regime_signal (RT_04 direct output) ===")
 spark.sql("""
     SELECT timestamp, PAYEMS_z, UNRATE_z, regime_name, position
-    FROM pawan_quant_research_1.default.bronze_rt_regime_signal
+    FROM pawan_quant_research_1.v4.bronze_rt_regime_signal
     ORDER BY timestamp DESC LIMIT 3
 """).show(vertical=True)
 
 print("=== silver_bt_master_grid_1h (macro source — last macro row) ===")
 spark.sql("""
     SELECT timestamp, PAYEMS_z, CPIAUCSL_z, UNRATE_z
-    FROM pawan_quant_research_1.default.silver_bt_master_grid_1h
+    FROM pawan_quant_research_1.v4.silver_bt_master_grid_1h
     ORDER BY timestamp DESC LIMIT 3
 """).show(vertical=True)
 
@@ -309,13 +309,13 @@ spark.sql("""
 
 print("=== RT_04 actual schema (what columns exist) ===")
 spark.sql("""
-    DESCRIBE pawan_quant_research_1.default.bronze_rt_regime_signal
+    DESCRIBE pawan_quant_research_1.v4.bronze_rt_regime_signal
 """).show()
 
 print("=== silver_bt_master_grid_1h — last macro row ===")
 spark.sql("""
     SELECT timestamp, PAYEMS_z, UNRATE_z, CPIAUCSL_z, GDPC1_z
-    FROM pawan_quant_research_1.default.silver_bt_master_grid_1h
+    FROM pawan_quant_research_1.v4.silver_bt_master_grid_1h
     ORDER BY timestamp DESC LIMIT 1
 """).show(vertical=True)
 
@@ -323,7 +323,7 @@ print("=== gold feed PAYEMS_z vs silver PAYEMS_z ===")
 spark.sql("""
     SELECT 
         'gold_feed'  as source, CAST(PAYEMS_z as STRING) as PAYEMS_z, signal_ts as ts
-    FROM pawan_quant_research_1.default.gold_rt_dashboard_feed
+    FROM pawan_quant_research_1.v4.gold_rt_dashboard_feed
     ORDER BY feed_ts DESC LIMIT 1
 """).show()
 
@@ -331,6 +331,6 @@ print("=== RT_04 FEATURES list vs silver_rt_1h columns ===")
 # This shows if RT_04 is reading the RIGHT column for PAYEMS
 spark.sql("""
     SELECT timestamp, PAYEMS_z, UNRATE_z
-    FROM pawan_quant_research_1.default.silver_rt_1h
+    FROM pawan_quant_research_1.v4.silver_rt_1h
     ORDER BY timestamp DESC LIMIT 1
 """).show(vertical=True)

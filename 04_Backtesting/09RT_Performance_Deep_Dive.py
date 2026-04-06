@@ -16,15 +16,15 @@ from pyspark.sql import functions as F
 
 # ── SETTINGS ──
 INITIAL_CAPITAL = 5_000_000
-SIGNAL_PATH     = "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_regime_signals-v4.csv"
-CSV_OUT_BASE    = "/Volumes/pawan_quant_research_1/default/market_data"
+SIGNAL_PATH     = "/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_regime_signals-v4.csv"
+CSV_OUT_BASE    = "/Volumes/pawan_quant_research_1/v4/market_data"
 
 # ── LOAD SIGNALS ──
 df = pd.read_csv(SIGNAL_PATH, index_col='timestamp', parse_dates=True)
 df.index = df.index.tz_localize(None)
 
 # ── LOAD PRICES FROM BT NAMESPACE ──
-market_sdf = spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+market_sdf = spark.table("pawan_quant_research_1.v4.bronze_bt_market_1h")
 prices_pdf = market_sdf.filter("symbol IN ('SPY', 'QQQ')").toPandas()
 prices_pdf = prices_pdf.drop_duplicates(subset=['timestamp', 'symbol'])
 prices_pdf['timestamp'] = pd.to_datetime(prices_pdf['timestamp']).dt.tz_localize(None)
@@ -885,7 +885,7 @@ else:
 
 print(f"Exporting returns: {comparison_df.index.min().date()} -> {comparison_df.index.max().date()}")
 
-CSV_OUT_BASE = "/Volumes/pawan_quant_research_1/default/market_data"
+CSV_OUT_BASE = "/Volumes/pawan_quant_research_1/v4/market_data"
 
 # ── Daily returns from equity curves ──
 daily_rets = pd.DataFrame({
@@ -985,7 +985,7 @@ for label, pdf in [("monthly", monthly), ("quarterly", quarterly), ("yearly", ye
         .format("delta") \
         .mode("overwrite") \
         .option("overwriteSchema", "true") \
-        .saveAsTable(f"pawan_quant_research_1.default.gold_bt_returns_{label}")
+        .saveAsTable(f"pawan_quant_research_1.v4.gold_bt_returns_{label}")
     print(f"Delta saved: gold_bt_returns_{label}")
 
 print("\nAll returns exported successfully.")

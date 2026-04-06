@@ -5,7 +5,7 @@ pip install xgboost
 
 # ── ONE-TIME MIGRATION: Add all missing columns to bronze_rt_regime_signal ──
 
-TARGET_TABLE = "pawan_quant_research_1.default.bronze_rt_regime_signal"
+TARGET_TABLE = "pawan_quant_research_1.v4.bronze_rt_regime_signal"
 
 # Check what currently exists
 existing_cols = [
@@ -46,9 +46,9 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType, TimestampType
 from datetime import datetime, timezone
 
-MODEL_PATH   = "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_xgboost_regime.joblib"
-SILVER_RT    = "pawan_quant_research_1.default.silver_rt_1h"
-TARGET_TABLE = "pawan_quant_research_1.default.bronze_rt_regime_signal"
+MODEL_PATH   = "/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_xgboost_regime.joblib"
+SILVER_RT    = "pawan_quant_research_1.v4.silver_rt_1h"
+TARGET_TABLE = "pawan_quant_research_1.v4.bronze_rt_regime_signal"
 
 FEATURES = [
     "CPIAUCSL_z", "PCEPI_z", "PCE_z", "PAYEMS_z", "UNRATE_z",
@@ -214,7 +214,7 @@ spark.sql("""
     SELECT timestamp, regime_name, position,
            VIXCLS_z, vix3m_z, VIX_Inversion_Z,
            PAYEMS_z, CPIAUCSL_z
-    FROM pawan_quant_research_1.default.bronze_rt_regime_signal
+    FROM pawan_quant_research_1.v4.bronze_rt_regime_signal
     ORDER BY timestamp DESC LIMIT 48
 """).show(truncate=False)
 
@@ -223,7 +223,7 @@ spark.sql("""
 # ── What drove yesterday's switch? Check VIX history ──
 spark.sql("""
     SELECT timestamp, close as VIX, series
-    FROM pawan_quant_research_1.default.bronze_rt_vix_1d
+    FROM pawan_quant_research_1.v4.bronze_rt_vix_1d
     WHERE series IN ('VIXCLS', 'vix3m')
     AND timestamp >= '2026-02-26'
     ORDER BY timestamp DESC, series
@@ -237,7 +237,7 @@ import pandas as pd
 import numpy as np
 
 model = joblib.load(
-    "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_xgboost_regime.joblib"
+    "/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_xgboost_regime.joblib"
 )
 
 # Current state
@@ -358,7 +358,7 @@ spark.sql(f"""
            ROUND(CPIAUCSL_z,2) as CPIAUCSL_z,
            ROUND(GDPC1_z,2) as GDPC1_z,
            ROUND(INDPRO_z,2) as INDPRO_z
-    FROM pawan_quant_research_1.default.silver_bt_master_grid_1h
+    FROM pawan_quant_research_1.v4.silver_bt_master_grid_1h
     WHERE PAYEMS_z < -2.5
     AND VIXCLS_z < 0.5
     AND GDPC1_z > 1.0
@@ -376,7 +376,7 @@ from sklearn.preprocessing import StandardScaler
 # Get full BT history to measure how far current point is from training data
 bt_pdf = spark.sql(f"""
     SELECT {', '.join(FEATURES)}
-    FROM pawan_quant_research_1.default.silver_bt_master_grid_1h
+    FROM pawan_quant_research_1.v4.silver_bt_master_grid_1h
     WHERE {' AND '.join([f'{f} IS NOT NULL' for f in FEATURES])}
 """).toPandas()
 
@@ -438,7 +438,7 @@ spark.sql(f"""
            ROUND(GDPC1_z,2) as GDPC1_z,
            ROUND(CPIAUCSL_z,2) as CPIAUCSL_z,
            ROUND(INDPRO_z,2) as INDPRO_z
-    FROM pawan_quant_research_1.default.silver_bt_master_grid_1h
+    FROM pawan_quant_research_1.v4.silver_bt_master_grid_1h
     WHERE PAYEMS_z < -1.5
     ORDER BY PAYEMS_z ASC
     LIMIT 20
@@ -466,7 +466,7 @@ spark.sql("""
     SELECT timestamp,
            ROUND(PAYEMS_z, 3) as PAYEMS_z,
            ROUND(PAYEMS_z - LAG(PAYEMS_z) OVER (ORDER BY timestamp), 3) as z_change
-    FROM pawan_quant_research_1.default.silver_bt_master_grid_1h
+    FROM pawan_quant_research_1.v4.silver_bt_master_grid_1h
     WHERE timestamp >= '2026-01-01'
     AND PAYEMS_z IS NOT NULL
     ORDER BY timestamp ASC
@@ -482,7 +482,7 @@ from datetime import datetime
 spark.sql("""
     SELECT series, timestamp, close,
            ROUND(close - LAG(close) OVER (PARTITION BY series ORDER BY timestamp), 2) as day_change
-    FROM pawan_quant_research_1.default.bronze_rt_vix_1d
+    FROM pawan_quant_research_1.v4.bronze_rt_vix_1d
     WHERE series IN ('VIXCLS', 'vix3m')
     ORDER BY timestamp DESC, series
     LIMIT 10
@@ -499,8 +499,8 @@ spark.sql("""
             WHEN v2.close > v1.close THEN '⚠️  INVERTED (3M > spot = sustained fear)'
             ELSE '✅ Normal (spot > 3M = short-term spike only)'
         END as structure
-    FROM pawan_quant_research_1.default.bronze_rt_vix_1d v1
-    JOIN pawan_quant_research_1.default.bronze_rt_vix_1d v2
+    FROM pawan_quant_research_1.v4.bronze_rt_vix_1d v1
+    JOIN pawan_quant_research_1.v4.bronze_rt_vix_1d v2
         ON v1.timestamp = v2.timestamp
         AND v1.series = 'VIXCLS'
         AND v2.series = 'vix3m'
@@ -515,7 +515,7 @@ spark.sql("""
 print("=== bronze_rt_vix_1d — full recent history ===")
 spark.sql("""
     SELECT series, timestamp, close
-    FROM pawan_quant_research_1.default.bronze_rt_vix_1d
+    FROM pawan_quant_research_1.v4.bronze_rt_vix_1d
     WHERE timestamp >= '2026-02-20'
     ORDER BY timestamp DESC, series
 """).show(truncate=False)
@@ -528,8 +528,8 @@ spark.sql("""
         v1.close as VIXCLS_actual,
         v2.close as VIX3M_actual,
         ROUND(v2.close - v1.close, 2) as spread
-    FROM pawan_quant_research_1.default.bronze_rt_vix_1d v1
-    JOIN pawan_quant_research_1.default.bronze_rt_vix_1d v2
+    FROM pawan_quant_research_1.v4.bronze_rt_vix_1d v1
+    JOIN pawan_quant_research_1.v4.bronze_rt_vix_1d v2
         ON v1.timestamp = v2.timestamp
         AND v1.series = 'VIXCLS'
         AND v2.series = 'vix3m'
@@ -547,7 +547,7 @@ import numpy as np
 # Pull the 1-year VIX history that RT_03 uses for z-score calculation
 vix_hist = spark.sql("""
     SELECT timestamp, series, close
-    FROM pawan_quant_research_1.default.bronze_rt_vix_1d
+    FROM pawan_quant_research_1.v4.bronze_rt_vix_1d
     WHERE series IN ('VIXCLS', 'vix3m')
     AND timestamp >= add_months(current_date(), -12)
     ORDER BY timestamp ASC
@@ -575,7 +575,7 @@ spark.sql("""
            ROUND(LAST(VIXCLS_z), 3) as last_VIXCLS_z,
            ROUND(LAST(vix3m_z), 3)  as last_vix3m_z,
            ROUND(LAST(VIX_Inversion_Z), 3) as last_inv_z
-    FROM pawan_quant_research_1.default.silver_bt_master_grid_1h
+    FROM pawan_quant_research_1.v4.silver_bt_master_grid_1h
 """).show()
 
 # COMMAND ----------
@@ -590,5 +590,5 @@ spark.sql("""
         ROUND(STDDEV(VIXCLS_z), 3) as std_VIXCLS_z,
         ROUND(MIN(VIXCLS_z), 3) as min_VIXCLS_z,
         ROUND(MAX(VIXCLS_z), 3) as max_VIXCLS_z
-    FROM pawan_quant_research_1.default.silver_bt_master_grid_1h
+    FROM pawan_quant_research_1.v4.silver_bt_master_grid_1h
 """).show()

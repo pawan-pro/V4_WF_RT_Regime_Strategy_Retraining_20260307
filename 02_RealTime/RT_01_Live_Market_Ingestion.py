@@ -34,7 +34,7 @@ client = StockHistoricalDataClient(API_KEY, API_SECRET)
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC CREATE TABLE IF NOT EXISTS pawan_quant_research_1.default.bronze_rt_market_1h (
+# MAGIC CREATE TABLE IF NOT EXISTS pawan_quant_research_1.v4.bronze_rt_market_1h (
 # MAGIC   symbol        STRING,
 # MAGIC   timestamp     TIMESTAMP,
 # MAGIC   open          DOUBLE,
@@ -69,7 +69,7 @@ API_SECRET = "5MnZMUeKU8EFaXFV6dHGUM1uS6kG8AgPXqCnaSjHVE2U"
 
 client = StockHistoricalDataClient(API_KEY, API_SECRET)
 TICKERS = ["SPY", "QQQ"]
-TARGET_TABLE = "pawan_quant_research_1.default.bronze_rt_market_1h"
+TARGET_TABLE = "pawan_quant_research_1.v4.bronze_rt_market_1h"
 
 # ── SNAPSHOT: Works pre-market, post-market, weekends ──
 def write_latest_snapshot():

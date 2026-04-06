@@ -4,7 +4,7 @@
 
 ```python
 CATALOG = "pawan_quant_research_1"
-SCHEMA  = "default"
+SCHEMA  = "v4"
 VOLUME  = "market_data"
 ```
 
@@ -29,13 +29,13 @@ VOLUME  = "market_data"
 ### Gold Tables (Analytics)
 | Table | Description |
 |-------|-------------|
-| `gold_rt_dashboard` | PowerBI-ready analytics |
+| `gold_rt_dashboard_feed` | PowerBI-ready analytics |
 
 ## Model Artifacts
 
 | File | Path | Description |
 |------|------|-------------|
-| Training Model | `/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_xgboost_regime.joblib` | Batch-trained XGBoost |
+| Training Model | `/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_xgboost_regime.joblib` | Batch-trained XGBoost |
 | Inference Model | Same as above | Loaded by RT_04 |
 
 ## API Integrations

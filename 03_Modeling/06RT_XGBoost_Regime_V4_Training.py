@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 
 
 # 1. Load the Silver Master Grid
-df = spark.table("pawan_quant_research_1.default.silver_bt_master_grid_1h").toPandas()
+df = spark.table("pawan_quant_research_1.v4.silver_bt_master_grid_1h").toPandas()
 df = df.sort_values("timestamp").set_index("timestamp")
 
 
@@ -109,11 +109,11 @@ for fold, (train_idx, test_idx) in enumerate(tscv.split(X), start=1):
 # 7. Final Training on labeled data (in-sample fit for full-history backtest)
 model.fit(X, y)
 
-#model_path = "/Volumes/pawan_quant_research_1/default/market_data/bt_v4_xgboost_regime.joblib"
+#model_path = "/Volumes/pawan_quant_research_1/v4/market_data/bt_v4_xgboost_regime.joblib"
 
 VIX_SOURCE = "fred_1d" #fred_1d #toggle #portara_1h
 
-model_path  = f"/Volumes/pawan_quant_research_1/default/market_data/bt_{VIX_SOURCE}_xgboost_regime.joblib"
+model_path  = f"/Volumes/pawan_quant_research_1/v4/market_data/bt_{VIX_SOURCE}_xgboost_regime.joblib"
 joblib.dump(model, model_path)
 print(f"\n✅ V4 XGBoost Model saved to {model_path}")
 
@@ -138,9 +138,9 @@ df["predicted_regime"] = model.predict(X_full)
 regime_map = {0: "Expansion", 1: "Slowdown", 2: "Recession"}
 df["regime_name"] = df["predicted_regime"].map(regime_map)
 
-#signal_path = "/Volumes/pawan_quant_research_1/default/market_data/bt_regime_signals-v4.csv"
+#signal_path = "/Volumes/pawan_quant_research_1/v4/market_data/bt_regime_signals-v4.csv"
 
-signal_path = f"/Volumes/pawan_quant_research_1/default/market_data/bt_{VIX_SOURCE}_regime_signals-v4.csv"
+signal_path = f"/Volumes/pawan_quant_research_1/v4/market_data/bt_{VIX_SOURCE}_regime_signals-v4.csv"
 df.to_csv(signal_path)
 
 print(f"✅ V4 Signal File saved to {signal_path}")

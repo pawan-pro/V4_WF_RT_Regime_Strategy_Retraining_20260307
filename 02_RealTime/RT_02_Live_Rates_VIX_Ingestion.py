@@ -12,7 +12,7 @@ from datetime import date
 from pyspark.sql import functions as F
 
 FRED_API_KEY = "f52bdf7341f23d0458820ecd806178db"
-TARGET_TABLE = "pawan_quant_research_1.default.bronze_rt_vix_1d"
+TARGET_TABLE = "pawan_quant_research_1.v4.bronze_rt_vix_1d"
 
 fred = Fred(api_key=FRED_API_KEY)
 

@@ -16,7 +16,7 @@ from datetime import datetime
 
 # --- CONFIGURATION ---
 API_KEY = "d5s3pchr01qoo9r2f3h0d5s3pchr01qoo9r2f3hg"
-VOLUME_PATH = "/Volumes/pawan_quant_research_1/default/market_data"
+VOLUME_PATH = "/Volumes/pawan_quant_research_1/v4/market_data"
 HAYSTACK_FILE = f"{VOLUME_PATH}/raw_finnhub_haystack.csv"
 
 # CHECK IF FILE EXISTS TO AVOID 30-MIN WAIT
@@ -179,7 +179,7 @@ if all_dfs:
 
 
     # 5. Save to the Bronze Layer (Managed Table)
-    TARGET_TABLE = f"pawan_quant_research_1.default.bronze_bt_macro_events"
+    TARGET_TABLE = f"pawan_quant_research_1.v4.bronze_bt_macro_events"
 
     (final_macro_sdf.write
         .format("delta")
@@ -207,7 +207,7 @@ else:
 import os
 import datetime
 
-file_path = "/Volumes/pawan_quant_research_1/default/market_data/first_releases_PAYEMS.csv"
+file_path = "/Volumes/pawan_quant_research_1/v4/market_data/first_releases_PAYEMS.csv"
 stats = os.stat(file_path)
 last_mod = datetime.datetime.fromtimestamp(stats.st_mtime)
 
@@ -221,13 +221,13 @@ display(spark.read.csv(file_path, header=True).tail(5))
 # COMMAND ----------
 
 # Check the most recent release date in the actual data
-df_check = pd.read_csv("/Volumes/pawan_quant_research_1/default/market_data/first_releases_PAYEMS.csv")
+df_check = pd.read_csv("/Volumes/pawan_quant_research_1/v4/market_data/first_releases_PAYEMS.csv")
 print(f"Most recent release in file: {df_check['release_date'].max()}")
 
 # COMMAND ----------
 
 df = spark.read.format("csv").option("header", True).load(
-    "/Volumes/pawan_quant_research_1/default/market_data/raw_finnhub_haystack.csv"
+    "/Volumes/pawan_quant_research_1/v4/market_data/raw_finnhub_haystack.csv"
 )
 
 df_filtered = df.filter(

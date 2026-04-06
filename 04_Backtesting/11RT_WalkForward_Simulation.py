@@ -27,12 +27,12 @@ from pyspark.sql import functions as F
 # ------------------------------------------------------------
 
 CATALOG = "pawan_quant_research_1"
-SCHEMA = "default"
+SCHEMA = "v4"
 
 SILVER_TABLE = f"{CATALOG}.{SCHEMA}.silver_bt_master_grid_1h"
 SIGNAL_TABLE = f"{CATALOG}.{SCHEMA}.bt_walkforward_regime_signals"
 
-LABEL_PATH = "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_regime_signals-v4.csv"
+LABEL_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_regime_signals-v4.csv"
 
 TRAIN_START = "2016-01-01"
 LIVE_START = "2021-01-01"
@@ -434,7 +434,7 @@ print("Signals saved:", SIGNAL_TABLE)
 # ------------------------------------------------------------
 
 prices = spark.table(
-    "pawan_quant_research_1.default.bronze_bt_market_1h"
+    "pawan_quant_research_1.v4.bronze_bt_market_1h"
 ).filter(
     "symbol IN ('SPY','QQQ')"
 ).toPandas()
@@ -541,7 +541,7 @@ wf_nav = wf_nav.rename(columns={"portfolio":"WF_Value"})
 # LOAD V4 SIGNAL FILE
 # ------------------------------------------------------------
 
-V4_SIGNAL_PATH = "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_regime_signals-v4.csv"
+V4_SIGNAL_PATH = "/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_regime_signals-v4.csv"
 
 v4 = pd.read_csv(V4_SIGNAL_PATH, parse_dates=["timestamp"])
 
@@ -553,7 +553,7 @@ v4 = v4.set_index("timestamp")
 # ------------------------------------------------------------
 
 prices = spark.table(
-"pawan_quant_research_1.default.bronze_bt_market_1h"
+"pawan_quant_research_1.v4.bronze_bt_market_1h"
 ).filter(
 "symbol IN ('SPY','QQQ')"
 ).toPandas()
@@ -869,7 +869,7 @@ display(daily_returns.head())
 # EXPORT CSVs
 # ------------------------------------------------------------
 
-EXPORT_PATH = "/Volumes/pawan_quant_research_1/default/market_data"
+EXPORT_PATH = "/Volumes/pawan_quant_research_1/v4/market_data"
 
 daily_returns.to_csv(f"{EXPORT_PATH}/strategy_daily_returns.csv")
 weekly_returns.to_csv(f"{EXPORT_PATH}/strategy_weekly_returns.csv")
@@ -1300,7 +1300,7 @@ if "signals_df" not in globals():
 
     print("Reloading signals from Delta table...")
 
-    SIGNAL_TABLE = "pawan_quant_research_1.default.bt_walkforward_regime_signals"
+    SIGNAL_TABLE = "pawan_quant_research_1.v4.bt_walkforward_regime_signals"
 
     signals_df = spark.table(SIGNAL_TABLE).toPandas()
 
@@ -1352,7 +1352,7 @@ v4_wf = v4_wf.loc[START_DATE:]
 # ------------------------------------------------------------
 
 v4_orig = pd.read_csv(
-    "/Volumes/pawan_quant_research_1/default/market_data/bt_fred_1d_regime_signals-v4.csv",
+    "/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_regime_signals-v4.csv",
     parse_dates=["timestamp"]
 )
 
@@ -1667,7 +1667,7 @@ trade_signals = trade_signals.sort_values("timestamp").reset_index(drop=True)
 # Load prices — use whichever source is available in your session
 # Option A: from Spark (hourly, most precise)
 prices_raw = spark.table(
-    "pawan_quant_research_1.default.bronze_bt_market_1h"
+    "pawan_quant_research_1.v4.bronze_bt_market_1h"
 ).filter(
     "symbol IN ('SPY','QQQ')"
 ).toPandas()
@@ -1753,7 +1753,7 @@ print("Signals loaded:", len(signals_df))
 
 
 # 2. LOAD RETURNS (already exported earlier)
-BASE_PATH = "/Volumes/pawan_quant_research_1/default/market_data"
+BASE_PATH = "/Volumes/pawan_quant_research_1/v4/market_data"
 
 daily_returns   = pd.read_csv(f"{BASE_PATH}/strategy_daily_returns.csv", index_col=0, parse_dates=True)
 weekly_returns  = pd.read_csv(f"{BASE_PATH}/strategy_weekly_returns.csv", index_col=0, parse_dates=True)
@@ -2274,7 +2274,7 @@ trade_signals = trade_signals.sort_values("timestamp").reset_index(drop=True)
 # 2. LOAD PRICES
 # ------------------------------------------------------------
 prices_raw = (
-    spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+    spark.table("pawan_quant_research_1.v4.bronze_bt_market_1h")
     .filter("symbol IN ('SPY','QQQ')")
     .toPandas()
 )
@@ -2464,7 +2464,7 @@ print("Annual returns table (through 2025 only):")
 display((yearly_returns * 100).round(2))
 
 # Optional export
-EXPORT_PATH = "/Volumes/pawan_quant_research_1/default/market_data"
+EXPORT_PATH = "/Volumes/pawan_quant_research_1/v4/market_data"
 yearly_returns.to_csv(f"{EXPORT_PATH}/yearly_returns_v4_v3_spy_till_2025.csv")
 print(f"Saved: {EXPORT_PATH}/yearly_returns_v4_v3_spy_till_2025.csv")
 
@@ -2509,7 +2509,7 @@ case_df["timestamp"] = pd.to_datetime(case_df["timestamp"])
 case_df = case_df.sort_values("timestamp")
 
 prices_raw = (
-    spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+    spark.table("pawan_quant_research_1.v4.bronze_bt_market_1h")
     .filter("symbol IN ('SPY','QQQ')")
     .toPandas()
 )
@@ -2649,7 +2649,7 @@ wf = wf[(wf["timestamp"] >= START_DATE) & (wf["timestamp"] <= END_DATE)].copy()
 # 2. LOAD PRICES
 # ------------------------------------------------------------
 prices = (
-    spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+    spark.table("pawan_quant_research_1.v4.bronze_bt_market_1h")
     .filter("symbol IN ('SPY','QQQ')")
     .toPandas()
 )
@@ -2799,7 +2799,7 @@ display(metrics_fmt)
 import pandas as pd
 
 # OPTION A — preferred: Delta table written by notebook
-SIGNAL_TABLE = "pawan_quant_research_1.default.bt_walkforward_regime_signals"
+SIGNAL_TABLE = "pawan_quant_research_1.v4.bt_walkforward_regime_signals"
 
 signals_df = spark.table(SIGNAL_TABLE).toPandas()
 signals_df["timestamp"] = pd.to_datetime(signals_df["timestamp"])
@@ -2848,7 +2848,7 @@ wf_df = wf_df[
 # 2. LOAD SPY / QQQ PRICES
 # ------------------------------------------------------------
 prices = (
-    spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+    spark.table("pawan_quant_research_1.v4.bronze_bt_market_1h")
     .filter("symbol IN ('SPY','QQQ')")
     .toPandas()
 )
@@ -3038,7 +3038,7 @@ plt.show()
 # ------------------------------------------------------------
 # 9. OPTIONAL EXPORT
 # ------------------------------------------------------------
-EXPORT_PATH = "/Volumes/pawan_quant_research_1/default/market_data"
+EXPORT_PATH = "/Volumes/pawan_quant_research_1/v4/market_data"
 
 nav_df.to_csv(f"{EXPORT_PATH}/v4_expansion_5x_nav.csv")
 metrics.to_csv(f"{EXPORT_PATH}/v4_expansion_5x_metrics.csv")
@@ -3072,7 +3072,7 @@ LEVERAGE_GRID = [1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
 # ------------------------------------------------------------
 # 1. LOAD SIGNALS (NO MODEL RERUN)
 # ------------------------------------------------------------
-SIGNAL_TABLE = "pawan_quant_research_1.default.bt_walkforward_regime_signals"
+SIGNAL_TABLE = "pawan_quant_research_1.v4.bt_walkforward_regime_signals"
 
 wf_df = spark.table(SIGNAL_TABLE).toPandas()
 wf_df["timestamp"] = pd.to_datetime(wf_df["timestamp"], utc=True).dt.tz_localize(None)
@@ -3086,7 +3086,7 @@ wf_df = wf_df[
 # 2. LOAD PRICES
 # ------------------------------------------------------------
 prices = (
-    spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+    spark.table("pawan_quant_research_1.v4.bronze_bt_market_1h")
     .filter("symbol IN ('SPY','QQQ')")
     .toPandas()
 )
@@ -3339,7 +3339,7 @@ for yr, rate in borrow_rate_by_year.items():
     print(f"  {yr}: {avg_yield_by_year[yr]*100:.2f}% + 50bps = {rate*100:.2f}%")
 
 # ── 2. LOAD SIGNALS + PRICES (reuse from cell 55) ───────────
-SIGNAL_TABLE = "pawan_quant_research_1.default.bt_walkforward_regime_signals"
+SIGNAL_TABLE = "pawan_quant_research_1.v4.bt_walkforward_regime_signals"
 
 wf_df = spark.table(SIGNAL_TABLE).toPandas()
 wf_df["timestamp"] = pd.to_datetime(wf_df["timestamp"])
@@ -3352,7 +3352,7 @@ wf_df = wf_df[
 ].copy()
 
 prices = (
-    spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+    spark.table("pawan_quant_research_1.v4.bronze_bt_market_1h")
     .filter("symbol IN ('SPY','QQQ')")
     .toPandas()
 )
@@ -3518,7 +3518,7 @@ plt.title("Expansion Leverage Sensitivity (incl. Borrowing Cost: 10yr UST + 50bp
           fontsize=14, pad=16)
 plt.tight_layout()
 
-EXPORT = "/Volumes/pawan_quant_research_1/default/market_data"
+EXPORT = "/Volumes/pawan_quant_research_1/v4/market_data"
 plt.savefig(f"{EXPORT}/ppt_leverage_with_borrow_cost.png", dpi=220, bbox_inches="tight")
 plt.show()
 
@@ -3613,7 +3613,7 @@ print("=== LEVERAGE SENSITIVITY TABLE ===")
 display(table_df)
 
 # Optional export for deck
-EXPORT_PATH = "/Volumes/pawan_quant_research_1/default/market_data"
+EXPORT_PATH = "/Volumes/pawan_quant_research_1/v4/market_data"
 table_df.to_csv(f"{EXPORT_PATH}/ppt_leverage_sensitivity_table.csv", index=False)
 print(f"Saved: {EXPORT_PATH}/ppt_leverage_sensitivity_table.csv")
 
@@ -3815,7 +3815,7 @@ plt.title("Expansion Leverage Sensitivity (incl. Borrowing Cost: 10yr UST + 50bp
           fontsize=14, pad=16)
 plt.tight_layout()
 
-EXPORT_PATH = "/Volumes/pawan_quant_research_1/default/market_data"
+EXPORT_PATH = "/Volumes/pawan_quant_research_1/v4/market_data"
 plt.savefig(f"{EXPORT_PATH}/ppt_expansion_leverage_table.png", dpi=220, bbox_inches="tight")
 plt.show()
 
@@ -3896,7 +3896,7 @@ for r, color in row_colors.items():
 plt.title("Leverage as a Function of Risk Appetite (incl. Borrowing Cost)", fontsize=15, pad=16)
 plt.tight_layout()
 
-EXPORT_PATH = "/Volumes/pawan_quant_research_1/default/market_data"
+EXPORT_PATH = "/Volumes/pawan_quant_research_1/v4/market_data"
 plt.savefig(f"{EXPORT_PATH}/ppt_risk_appetite_table.png", dpi=220, bbox_inches="tight")
 plt.show()
 
@@ -3920,7 +3920,7 @@ END   = "2026-03-31"
 
 # ── 1. LOAD V4 SIGNALS (Delta) ──────────────────────────────
 v4 = (
-    spark.table("pawan_quant_research_1.default.bt_walkforward_regime_signals")
+    spark.table("pawan_quant_research_1.v4.bt_walkforward_regime_signals")
     .toPandas()
 )
 v4["timestamp"] = pd.to_datetime(v4["timestamp"])
@@ -3929,7 +3929,7 @@ v4 = v4.loc[START:END]
 
 # ── 2. LOAD DAILY PRICES (bronze hourly → daily close) ─────
 prices_h = (
-    spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+    spark.table("pawan_quant_research_1.v4.bronze_bt_market_1h")
     .filter("symbol IN ('SPY','QQQ')")
     .toPandas()
 )
@@ -4014,7 +4014,7 @@ ax.grid(axis="y", alpha=0.3)
 ax.legend(fontsize=11, loc="upper left")
 plt.tight_layout()
 
-EXPORT = "/Volumes/pawan_quant_research_1/default/market_data"
+EXPORT = "/Volumes/pawan_quant_research_1/v4/market_data"
 plt.savefig(f"{EXPORT}/ppt_annual_returns_2021_2026ytd.png", dpi=220, bbox_inches="tight")
 plt.show()
 
@@ -4146,7 +4146,7 @@ for idx, (metric, title, mult) in enumerate(zip(metric_cols, metric_titles, metr
 plt.suptitle(f"Trailing Performance: V4 Walk-Forward vs SPY — as of {AS_OF}", fontsize=16, y=1.02)
 plt.tight_layout()
 
-EXPORT = "/Volumes/pawan_quant_research_1/default/market_data"
+EXPORT = "/Volumes/pawan_quant_research_1/v4/market_data"
 plt.savefig(f"{EXPORT}/ppt_trailing_1yr_3yr_5yr.png", dpi=220, bbox_inches="tight")
 plt.show()
 

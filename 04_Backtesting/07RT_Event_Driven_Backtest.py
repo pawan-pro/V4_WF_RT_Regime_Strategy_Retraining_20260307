@@ -11,12 +11,12 @@ import seaborn as sns
 
 # 1. Load the V4 Signal File
 VIX_SOURCE  = "fred_1d" #toggle #portara_1h #fred_1d
-signal_path = f"/Volumes/pawan_quant_research_1/default/market_data/bt_{VIX_SOURCE}_regime_signals-v4.csv"
+signal_path = f"/Volumes/pawan_quant_research_1/v4/market_data/bt_{VIX_SOURCE}_regime_signals-v4.csv"
 df = pd.read_csv(signal_path, index_col='timestamp', parse_dates=True)
 df.index = df.index.tz_localize(None) # Harmonize to Naive UTC
 
 # 2. Load Hourly ETF Prices
-market_sdf = spark.table("pawan_quant_research_1.default.bronze_bt_market_1h")
+market_sdf = spark.table("pawan_quant_research_1.v4.bronze_bt_market_1h")
 # FIX: Filter and Deduplicate before converting to Pandas
 qqq_prices_pdf = market_sdf.filter("symbol = 'QQQ'").dropDuplicates(["timestamp"]).toPandas()
 qqq_prices_pdf['timestamp'] = pd.to_datetime(qqq_prices_pdf['timestamp']).dt.tz_localize(None)

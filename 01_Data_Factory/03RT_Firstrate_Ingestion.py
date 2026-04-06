@@ -18,7 +18,7 @@ EXTRACT_PATH = "/tmp/firstrate_rates_extract"
 
 # Target Unity Catalog Table
 CATALOG = "pawan_quant_research_1"
-SCHEMA = "default"
+SCHEMA = "v4"
 # ADD these two lines after SCHEMA
 BT_PREFIX  = "bt"
 TARGET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_{BT_PREFIX}_rates_1h"
@@ -193,7 +193,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
 # Target Table
-TARGET_TABLE = f"pawan_quant_research_1.default.bronze_bt_rates_1h"
+TARGET_TABLE = f"pawan_quant_research_1.v4.bronze_bt_rates_1h"
 
 # 1. Load the table
 rates_df = spark.table(TARGET_TABLE)
@@ -237,7 +237,7 @@ display(tail_df.orderBy("symbol", "timestamp"))
 # MAGIC ---
 # MAGIC
 # MAGIC ### **2. Target Data Definitions**
-# MAGIC *   **Database:** `pawan_quant_research_1.default`
+# MAGIC *   **Database:** `pawan_quant_research_1.v4`
 # MAGIC *   **Table Name:** `bronze_rates_1h`
 # MAGIC *   **Target Resolution:** 1-Hour OHLCV (UTC)
 # MAGIC *   **Included Symbols:**
@@ -306,7 +306,7 @@ display(tail_df.orderBy("symbol", "timestamp"))
 
 # COMMAND ----------
 
-rates_df = spark.table("pawan_quant_research_1.default.bronze_bt_rates_1h").filter(
+rates_df = spark.table("pawan_quant_research_1.v4.bronze_bt_rates_1h").filter(
     (F.col("timestamp") >= "2024-03-01") &
     (F.col("timestamp") <= "2024-04-30")
 )
