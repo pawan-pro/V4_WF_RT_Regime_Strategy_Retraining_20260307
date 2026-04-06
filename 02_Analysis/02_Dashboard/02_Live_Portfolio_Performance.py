@@ -1,6 +1,7 @@
 # Databricks notebook source
 # Live portfolio performance since first V4 signal
 
+import matplotlib.pyplot as plt
 import pandas as pd
 
 CATALOG = "pawan_quant_research_1"
@@ -18,6 +19,7 @@ LEGACY_MARKET_TABLE = f"{CATALOG}.{LEGACY_SCHEMA}.bronze_rt_market_1h"
 TARGET_TIMESERIES = f"{CATALOG}.{SCHEMA}.gold_rt_portfolio_timeseries"
 TARGET_SUMMARY = f"{CATALOG}.{SCHEMA}.gold_rt_portfolio_summary"
 EXPORT_ROOT = f"/Volumes/{CATALOG}/{SCHEMA}/market_data/performance/live"
+CHART_PATH = f"{EXPORT_ROOT}/live_portfolio_performance.png"
 
 REGIME_NAME_MAP = {0: "Expansion", 1: "Slowdown", 2: "Recession"}
 POSITION_MAP = {0: "100% QQQ", 1: "100% SPY", 2: "100% CASH"}
@@ -248,12 +250,47 @@ def save_outputs(data):
     summary.to_csv(f"{EXPORT_ROOT}/live_portfolio_summary.csv", index=False)
 
 
+def render_chart(data):
+    chart_df = data.sort_values("timestamp").reset_index(drop=True).copy()
+    chart_df["timestamp"] = pd.to_datetime(chart_df["timestamp"])
+
+    fig, (ax1, ax2) = plt.subplots(
+        2,
+        1,
+        figsize=(16, 8),
+        gridspec_kw={"height_ratios": [4, 1]},
+        sharex=True,
+    )
+
+    ax1.plot(chart_df["timestamp"], chart_df["strategy_value"], label="Strategy", linewidth=2)
+    ax1.plot(chart_df["timestamp"], chart_df["spy_benchmark"], label="SPY Benchmark", alpha=0.7)
+    ax1.set_title("Live Portfolio Performance vs SPY")
+    ax1.set_ylabel("Portfolio Value")
+    ax1.legend()
+    ax1.grid(True)
+
+    regimes = chart_df["regime_int"]
+    ax2.fill_between(chart_df["timestamp"], 0, 1, where=(regimes == 0), color="green", alpha=0.35, label="Expansion (QQQ)")
+    ax2.fill_between(chart_df["timestamp"], 0, 1, where=(regimes == 1), color="gold", alpha=0.35, label="Slowdown (SPY)")
+    ax2.fill_between(chart_df["timestamp"], 0, 1, where=(regimes == 2), color="red", alpha=0.35, label="Recession (Cash)")
+    ax2.set_yticks([])
+    ax2.set_ylabel("Regime")
+    ax2.legend(loc="upper right")
+
+    plt.tight_layout()
+    fig.savefig(CHART_PATH, dpi=150, bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+
+
 portfolio_df = run_live_nav(load_inputs())
 save_outputs(portfolio_df)
+render_chart(portfolio_df)
 
 latest = portfolio_df.iloc[-1]
 print(f"Live portfolio time series written to {TARGET_TIMESERIES}")
 print(f"Live portfolio summary written to {TARGET_SUMMARY}")
+print(f"Live portfolio chart written to {CHART_PATH}")
 print(f"Start timestamp: {portfolio_df['timestamp'].iloc[0]}")
 print(f"As of timestamp: {latest['timestamp']}")
 print(f"Strategy value: {latest['strategy_value']}")
