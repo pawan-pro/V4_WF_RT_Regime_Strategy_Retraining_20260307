@@ -10,6 +10,10 @@
   "tasks": [
     {
       "task_key": "macro_incremental_update",
+      "libraries": [
+        {"pypi": {"package": "finnhub-python==2.4.25"}},
+        {"pypi": {"package": "fredapi==0.5.2"}}
+      ],
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/01_Ingestion/03_BT_Macro_Incremental_Update"
       }
@@ -24,6 +28,9 @@
     {
       "task_key": "monthly_walkforward_retrain",
       "depends_on": [{"task_key": "silver_incremental_refresh"}],
+      "libraries": [
+        {"pypi": {"package": "xgboost==3.1.1"}}
+      ],
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/04_Retraining/01_Monthly_Walkforward_Retrain"
       }

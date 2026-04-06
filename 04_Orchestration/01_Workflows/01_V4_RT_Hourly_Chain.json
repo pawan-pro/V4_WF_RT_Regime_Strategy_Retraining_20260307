@@ -10,6 +10,10 @@
   "tasks": [
     {
       "task_key": "rt_01_market",
+      "libraries": [
+        {"pypi": {"package": "alpaca-py==0.43.2"}},
+        {"pypi": {"package": "nest_asyncio==1.6.0"}}
+      ],
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/01_RT_Live_Market_Ingestion"
       }
@@ -17,6 +21,9 @@
     {
       "task_key": "rt_02_vix",
       "depends_on": [{"task_key": "rt_01_market"}],
+      "libraries": [
+        {"pypi": {"package": "fredapi==0.5.2"}}
+      ],
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/02_RT_Live_Rates_VIX_Ingestion"
       }
@@ -31,6 +38,9 @@
     {
       "task_key": "rt_04_inference",
       "depends_on": [{"task_key": "rt_03_silver"}],
+      "libraries": [
+        {"pypi": {"package": "xgboost==3.1.1"}}
+      ],
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/04_RT_Model_Inference_Engine"
       }
@@ -38,6 +48,9 @@
     {
       "task_key": "rt_05_trade",
       "depends_on": [{"task_key": "rt_04_inference"}],
+      "libraries": [
+        {"pypi": {"package": "alpaca-py==0.43.2"}}
+      ],
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/05_RT_Paper_Trade_Execution"
       }
