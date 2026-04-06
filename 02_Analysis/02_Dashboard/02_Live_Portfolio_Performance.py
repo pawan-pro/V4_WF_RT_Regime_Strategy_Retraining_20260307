@@ -5,6 +5,7 @@ import pandas as pd
 
 CATALOG = "pawan_quant_research_1"
 SCHEMA = "v4"
+LEGACY_SCHEMA = "default"
 
 INITIAL_CAPITAL = 10_000.0
 TRADING_COST = 0.0005
@@ -12,29 +13,79 @@ TRADING_COST = 0.0005
 SIGNAL_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_regime_signal"
 MARKET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_market_1h"
 TRADE_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_paper_trade_log"
+LEGACY_SIGNAL_TABLE = f"{CATALOG}.{LEGACY_SCHEMA}.bronze_rt_regime_signal"
+LEGACY_MARKET_TABLE = f"{CATALOG}.{LEGACY_SCHEMA}.bronze_rt_market_1h"
 TARGET_TIMESERIES = f"{CATALOG}.{SCHEMA}.gold_rt_portfolio_timeseries"
 TARGET_SUMMARY = f"{CATALOG}.{SCHEMA}.gold_rt_portfolio_summary"
 EXPORT_ROOT = f"/Volumes/{CATALOG}/{SCHEMA}/market_data/performance/live"
 
+REGIME_NAME_MAP = {0: "Expansion", 1: "Slowdown", 2: "Recession"}
+POSITION_MAP = {0: "100% QQQ", 1: "100% SPY", 2: "100% CASH"}
+
+
+def load_union_frame(query_blocks):
+    sql = "\nUNION ALL\n".join(query_blocks)
+    if not sql.strip():
+        return pd.DataFrame()
+    return spark.sql(sql).toPandas()
+
+
+def table_exists(table_name):
+    return spark.catalog.tableExists(table_name)
+
 
 def load_inputs():
-    signals = spark.sql(
-        f"""
-        SELECT timestamp, regime_int, regime_name, position, model_version
-        FROM {SIGNAL_TABLE}
-        ORDER BY timestamp
-        """
-    ).toPandas()
+    signal_queries = []
+    if table_exists(LEGACY_SIGNAL_TABLE):
+        signal_queries.append(
+            f"""
+            SELECT
+                timestamp,
+                regime_int,
+                CAST(NULL AS STRING) AS regime_name,
+                CAST(NULL AS STRING) AS position,
+                'legacy_default_rt' AS model_version,
+                0 AS source_rank
+            FROM {LEGACY_SIGNAL_TABLE}
+            """
+        )
+    if table_exists(SIGNAL_TABLE):
+        signal_queries.append(
+            f"""
+            SELECT
+                timestamp,
+                regime_int,
+                regime_name,
+                position,
+                COALESCE(model_version, 'v4_rt') AS model_version,
+                1 AS source_rank
+            FROM {SIGNAL_TABLE}
+            """
+        )
+
+    signals = load_union_frame(signal_queries)
     if signals.empty:
         raise ValueError("No RT regime signals found. Run RT_04 first.")
 
-    prices = spark.sql(
-        f"""
-        SELECT timestamp, symbol, close
-        FROM {MARKET_TABLE}
-        WHERE symbol IN ('SPY', 'QQQ')
-        """
-    ).toPandas()
+    price_queries = []
+    if table_exists(LEGACY_MARKET_TABLE):
+        price_queries.append(
+            f"""
+            SELECT timestamp, symbol, close, 0 AS source_rank
+            FROM {LEGACY_MARKET_TABLE}
+            WHERE symbol IN ('SPY', 'QQQ')
+            """
+        )
+    if table_exists(MARKET_TABLE):
+        price_queries.append(
+            f"""
+            SELECT timestamp, symbol, close, 1 AS source_rank
+            FROM {MARKET_TABLE}
+            WHERE symbol IN ('SPY', 'QQQ')
+            """
+        )
+
+    prices = load_union_frame(price_queries)
     if prices.empty:
         raise ValueError("No RT market prices found. Run RT_01 first.")
 
@@ -55,13 +106,25 @@ def load_inputs():
     ).toPandas()
 
     signals["timestamp"] = pd.to_datetime(signals["timestamp"])
+    signals = (
+        signals.sort_values(["timestamp", "source_rank"])
+        .drop_duplicates(subset=["timestamp"], keep="last")
+        .drop(columns=["source_rank"])
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+    signals["regime_name"] = signals["regime_name"].fillna(signals["regime_int"].map(REGIME_NAME_MAP))
+    signals["position"] = signals["position"].fillna(signals["regime_int"].map(POSITION_MAP))
+
     prices["timestamp"] = pd.to_datetime(prices["timestamp"])
     if not trades.empty:
         trades["signal_ts"] = pd.to_datetime(trades["signal_ts"])
         trades["trade_ts"] = pd.to_datetime(trades["trade_ts"])
 
     prices = (
-        prices.drop_duplicates(subset=["timestamp", "symbol"])
+        prices.sort_values(["timestamp", "symbol", "source_rank"])
+        .drop_duplicates(subset=["timestamp", "symbol"], keep="last")
+        .drop(columns=["source_rank"])
         .pivot(index="timestamp", columns="symbol", values="close")
         .sort_index()
         .ffill()
@@ -84,20 +147,10 @@ def load_inputs():
         ).drop(columns=["signal_ts"])
 
     return merged
-
-
-def starting_capital(data):
-    account_equity = data["account_equity"].dropna() if "account_equity" in data.columns else pd.Series(dtype=float)
-    if not account_equity.empty:
-        return float(account_equity.iloc[0])
-    return INITIAL_CAPITAL
-
-
 def run_live_nav(data):
     data = data.sort_values("timestamp").reset_index(drop=True).copy()
-    start_capital = starting_capital(data)
-    portfolio = [start_capital]
-    current_val = start_capital
+    portfolio = [INITIAL_CAPITAL]
+    current_val = INITIAL_CAPITAL
     active_asset = "START"
     active_assets = ["START"]
     trade_costs = [0.0]
@@ -124,7 +177,7 @@ def run_live_nav(data):
         active_asset = target
 
     data["strategy_value"] = portfolio
-    data["spy_benchmark"] = (data["SPY"] / data["SPY"].iloc[0]) * start_capital
+    data["spy_benchmark"] = (data["SPY"] / data["SPY"].iloc[0]) * INITIAL_CAPITAL
     data["active_asset"] = active_assets
     data["step_return"] = step_returns
     data["transaction_cost"] = trade_costs
@@ -205,4 +258,6 @@ print(f"Start timestamp: {portfolio_df['timestamp'].iloc[0]}")
 print(f"As of timestamp: {latest['timestamp']}")
 print(f"Strategy value: {latest['strategy_value']}")
 print(f"SPY benchmark: {latest['spy_benchmark']}")
+print(f"Strategy total return pct: {latest['strategy_value'] / portfolio_df['strategy_value'].iloc[0] - 1.0}")
+print(f"SPY total return pct: {latest['spy_benchmark'] / portfolio_df['spy_benchmark'].iloc[0] - 1.0}")
 print(f"Alpha pct: {latest['alpha_pct']}")
