@@ -7,7 +7,7 @@ CATALOG = "pawan_quant_research_1"
 SCHEMA = "v4"
 LEGACY_SCHEMA = "default"
 
-INITIAL_CAPITAL = 10_000.0
+INITIAL_CAPITAL = 100_000.0
 TRADING_COST = 0.0005
 
 SIGNAL_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_regime_signal"
