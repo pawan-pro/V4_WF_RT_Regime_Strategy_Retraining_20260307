@@ -67,6 +67,8 @@ SIGNAL_COLUMNS = {
     "ingestion_ts": "TIMESTAMP",
 }
 
+MERGE_COLUMNS = list(SIGNAL_COLUMNS.keys())
+
 
 def existing_columns(table_name):
     if not spark.catalog.tableExists(table_name):
@@ -108,10 +110,6 @@ def ensure_signal_table():
         USING DELTA
         """
     )
-    current = existing_columns(TARGET_TABLE)
-    for legacy_prob_col in ["prob_expansion", "prob_slowdown", "prob_recession"]:
-        if legacy_prob_col in current:
-            spark.sql(f"ALTER TABLE {TARGET_TABLE} DROP COLUMN {legacy_prob_col}")
     current = existing_columns(TARGET_TABLE)
     for name, dtype in SIGNAL_COLUMNS.items():
         if name not in current:
@@ -211,13 +209,19 @@ sdf = spark.createDataFrame([signal_row], schema=schema).withColumn(
 )
 sdf.createOrReplaceTempView("incoming_rt_regime_signal")
 
+update_clause = ",\n        ".join([f"t.{col} = s.{col}" for col in MERGE_COLUMNS])
+insert_columns = ", ".join(MERGE_COLUMNS)
+insert_values = ", ".join([f"s.{col}" for col in MERGE_COLUMNS])
+
 spark.sql(
     f"""
     MERGE INTO {TARGET_TABLE} t
     USING incoming_rt_regime_signal s
     ON t.timestamp = s.timestamp
-    WHEN MATCHED THEN UPDATE SET *
-    WHEN NOT MATCHED THEN INSERT *
+    WHEN MATCHED THEN UPDATE SET
+        {update_clause}
+    WHEN NOT MATCHED THEN INSERT ({insert_columns})
+    VALUES ({insert_values})
     """
 )
 
