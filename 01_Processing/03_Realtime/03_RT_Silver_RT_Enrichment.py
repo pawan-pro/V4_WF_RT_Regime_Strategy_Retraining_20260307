@@ -2,6 +2,8 @@
 # RT_03: Silver RT Enrichment
 # Produces one inference-ready row matching silver_bt_master_grid_1h schema
 
+# MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config
+
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType, TimestampType
@@ -13,6 +15,8 @@ TARGET_TABLE  = "pawan_quant_research_1.v4.silver_rt_1h"
 SILVER_HIST   = "pawan_quant_research_1.v4.silver_bt_master_grid_1h"
 BRONZE_MARKET = "pawan_quant_research_1.v4.bronze_rt_market_1h"
 BRONZE_VIX    = "pawan_quant_research_1.v4.bronze_rt_vix_1d"
+runtime_config = load_runtime_instrument_config(spark)
+PRIMARY_SYMBOL = runtime_config["primary_symbol"]
 
 # ── CREATE TABLE IF NOT EXISTS ──
 spark.sql(f"""
@@ -41,7 +45,7 @@ spark.sql(f"""
 # ── STEP 1: Get latest RT prices from bronze_rt_market_1h ──
 spy_row = spark.sql(f"""
     SELECT timestamp, close FROM {BRONZE_MARKET}
-    WHERE symbol = 'SPY'
+    WHERE symbol = '{PRIMARY_SYMBOL}'
     ORDER BY timestamp DESC LIMIT 1
 """).collect()[0]
 
@@ -68,7 +72,10 @@ vix_latest_date = spark.sql(f"""
 assert vix_latest_date.date() < date.today(), \
     f"🚨 LOOKAHEAD BIAS: VIX date {vix_latest_date.date()} >= today {date.today()}"
 
-print(f"RT inputs → ts:{rt_ts}  SPY:{spy_close}  VIX:{vix_close}  VIX3M:{vix3m_close}")
+print(
+    f"RT inputs → ts:{rt_ts}  {PRIMARY_SYMBOL}:{spy_close}  "
+    f"VIX:{vix_close}  VIX3M:{vix3m_close}"
+)
 print(f"✅ Bias gate passed | VIX date: {vix_latest_date.date()}")
 
 # ── STEP 2: Macro z-scores — carry forward from BT silver history ──

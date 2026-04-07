@@ -1,12 +1,18 @@
 # Databricks notebook source
 # Live portfolio performance since first V4 signal
 
+# MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config
+
 import matplotlib.pyplot as plt
 import pandas as pd
 
 CATALOG = "pawan_quant_research_1"
 SCHEMA = "v4"
 LEGACY_SCHEMA = "default"
+runtime_config = load_runtime_instrument_config(spark, CATALOG, SCHEMA)
+PRIMARY_SYMBOL = runtime_config["primary_symbol"]
+SECONDARY_SYMBOL = runtime_config["secondary_symbol"]
+SYMBOLS_SQL = ", ".join([f"'{symbol}'" for symbol in {PRIMARY_SYMBOL, SECONDARY_SYMBOL} if symbol])
 
 INITIAL_CAPITAL = 100_000.0
 TRADING_COST = 0.0005
@@ -22,7 +28,7 @@ EXPORT_ROOT = f"/Volumes/{CATALOG}/{SCHEMA}/market_data/performance/live"
 CHART_PATH = f"{EXPORT_ROOT}/live_portfolio_performance.png"
 
 REGIME_NAME_MAP = {0: "Expansion", 1: "Slowdown", 2: "Recession"}
-POSITION_MAP = {0: "100% QQQ", 1: "100% SPY", 2: "100% CASH"}
+POSITION_MAP = runtime_config["position_map"]
 
 
 def load_union_frame(query_blocks):
@@ -75,7 +81,7 @@ def load_inputs():
             f"""
             SELECT timestamp, symbol, close, 0 AS source_rank
             FROM {LEGACY_MARKET_TABLE}
-            WHERE symbol IN ('SPY', 'QQQ')
+            WHERE symbol IN ({SYMBOLS_SQL})
             """
         )
     if table_exists(MARKET_TABLE):
@@ -83,7 +89,7 @@ def load_inputs():
             f"""
             SELECT timestamp, symbol, close, 1 AS source_rank
             FROM {MARKET_TABLE}
-            WHERE symbol IN ('SPY', 'QQQ')
+            WHERE symbol IN ({SYMBOLS_SQL})
             """
         )
 
@@ -135,7 +141,7 @@ def load_inputs():
     merged = (
         signals.set_index("timestamp")
         .join(prices, how="inner")
-        .dropna(subset=["SPY", "QQQ"])
+        .dropna(subset=[PRIMARY_SYMBOL, SECONDARY_SYMBOL])
         .reset_index()
         .rename(columns={"index": "timestamp"})
     )
@@ -160,12 +166,12 @@ def run_live_nav(data):
 
     for i in range(1, len(data)):
         regime = int(data["regime_int"].iloc[i - 1])
-        target = "QQQ" if regime == 0 else "SPY" if regime == 1 else "CASH"
+        target = runtime_config["regime_ticker"].get(regime) or "CASH"
 
-        if target == "QQQ":
-            ret = (data["QQQ"].iloc[i] / data["QQQ"].iloc[i - 1]) - 1.0
-        elif target == "SPY":
-            ret = (data["SPY"].iloc[i] / data["SPY"].iloc[i - 1]) - 1.0
+        if target == SECONDARY_SYMBOL:
+            ret = (data[SECONDARY_SYMBOL].iloc[i] / data[SECONDARY_SYMBOL].iloc[i - 1]) - 1.0
+        elif target == PRIMARY_SYMBOL:
+            ret = (data[PRIMARY_SYMBOL].iloc[i] / data[PRIMARY_SYMBOL].iloc[i - 1]) - 1.0
         else:
             ret = 0.0
 
@@ -179,7 +185,9 @@ def run_live_nav(data):
         active_asset = target
 
     data["strategy_value"] = portfolio
-    data["spy_benchmark"] = (data["SPY"] / data["SPY"].iloc[0]) * INITIAL_CAPITAL
+    data["spy_benchmark"] = (
+        data[PRIMARY_SYMBOL] / data[PRIMARY_SYMBOL].iloc[0]
+    ) * INITIAL_CAPITAL
     data["active_asset"] = active_assets
     data["step_return"] = step_returns
     data["transaction_cost"] = trade_costs

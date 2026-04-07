@@ -1,6 +1,8 @@
 # Databricks notebook source
 # RT_04: Model Inference Engine
 
+# MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config
+
 # MAGIC %pip install xgboost
 
 import joblib
@@ -40,7 +42,8 @@ FEATURES = [
 ]
 
 REGIME_MAP = {0: "Expansion", 1: "Slowdown", 2: "Recession"}
-POSITION_MAP = {0: "100% QQQ", 1: "100% SPY", 2: "100% CASH"}
+runtime_config = load_runtime_instrument_config(spark, CATALOG, SCHEMA)
+POSITION_MAP = runtime_config["position_map"]
 
 SIGNAL_COLUMNS = {
     "timestamp": "TIMESTAMP",

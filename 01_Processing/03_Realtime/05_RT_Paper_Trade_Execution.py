@@ -1,6 +1,8 @@
 # Databricks notebook source
 # RT_05: Paper Trade Execution
 
+# MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config
+
 # MAGIC %pip install alpaca-py
 
 import json
@@ -32,7 +34,20 @@ SIGNAL_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_regime_signal"
 MARKET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_market_1h"
 TARGET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_paper_trade_log"
 
-REGIME_TICKER = {0: "QQQ", 1: "SPY", 2: None}
+runtime_config = load_runtime_instrument_config(spark, CATALOG, SCHEMA)
+REGIME_TICKER = runtime_config["regime_ticker"]
+PRICE_SYMBOLS = list(
+    dict.fromkeys(
+        [
+            symbol
+            for symbol in [
+                runtime_config["primary_symbol"],
+                runtime_config["secondary_symbol"],
+            ]
+            if symbol
+        ]
+    )
+)
 TRADE_VALUE = 100_000
 
 TRADE_COLUMNS = {
@@ -185,6 +200,21 @@ position_str = signal["position"]
 signal_ts = signal["timestamp"]
 target_ticker = REGIME_TICKER[regime_int]
 
+existing_trade = spark.sql(
+    f"""
+    SELECT trade_ts
+    FROM {TARGET_TABLE}
+    WHERE signal_ts = '{signal_ts}'
+    ORDER BY trade_ts DESC
+    LIMIT 1
+    """
+).collect()
+if existing_trade:
+    dbutils.notebook.exit(
+        f"Trade log already exists for signal_ts={signal_ts}. "
+        f"Skipping duplicate 24/7 run."
+    )
+
 pre_positions = trading_client.get_all_positions()
 held_tickers = {position.symbol: safe_float(position.qty) for position in pre_positions}
 held_symbols = list(held_tickers.keys())
@@ -259,7 +289,7 @@ day_pnl = None if equity is None or last_equity in (None, 0.0) else equity - las
 day_pnl_pct = None if day_pnl is None or last_equity in (None, 0.0) else day_pnl / last_equity
 
 price_map = {}
-for symbol in ["SPY", "QQQ"]:
+for symbol in PRICE_SYMBOLS:
     rows = spark.sql(
         f"""
         SELECT close
@@ -311,8 +341,8 @@ trade_row = {
     "switched": switched,
     "transaction_cost": txn_cost,
     "orders_placed": "|".join(orders_placed) if orders_placed else "NONE",
-    "spy_close": price_map.get("SPY"),
-    "qqq_close": price_map.get("QQQ"),
+    "spy_close": price_map.get(runtime_config["primary_symbol"]),
+    "qqq_close": price_map.get(runtime_config["secondary_symbol"]),
     "account_equity": equity,
     "account_cash": cash,
     "last_equity": last_equity,

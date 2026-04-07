@@ -2,7 +2,7 @@
   "name": "v4_macro_hourly_maintenance",
   "description": "Hourly macro update and bounded silver refresh for V4",
   "schedule": {
-    "quartz_cron_expression": "0 15 8-17 ? * MON-FRI",
+    "quartz_cron_expression": "0 15 * ? * *",
     "timezone_id": "America/New_York",
     "pause_status": "UNPAUSED"
   },
@@ -29,6 +29,9 @@
     {
       "task_key": "macro_incremental_update",
       "job_cluster_key": "v4_job_cluster",
+      "max_retries": 2,
+      "min_retry_interval_millis": 300000,
+      "retry_on_timeout": true,
       "libraries": [
         {"pypi": {"package": "finnhub-python==2.4.25"}},
         {"pypi": {"package": "fredapi==0.5.2"}}
@@ -41,6 +44,9 @@
       "task_key": "silver_incremental_refresh",
       "depends_on": [{"task_key": "macro_incremental_update"}],
       "job_cluster_key": "v4_job_cluster",
+      "max_retries": 2,
+      "min_retry_interval_millis": 300000,
+      "retry_on_timeout": true,
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/02_Features/02_BT_Incremental_Silver_Refresh"
       }

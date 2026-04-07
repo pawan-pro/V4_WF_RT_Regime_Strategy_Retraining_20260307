@@ -13,6 +13,10 @@
 
 # COMMAND ----------
 
+# MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config
+
+# COMMAND ----------
+
 from alpaca.data.historical import StockHistoricalDataClient
 
 try:
@@ -25,6 +29,11 @@ except:
     print("⚠️  Using Fallback Credentials")
 
 client = StockHistoricalDataClient(API_KEY, API_SECRET)
+runtime_config = load_runtime_instrument_config(spark)
+print(
+    f"Runtime config: {runtime_config['config_name']} | "
+    f"symbols={runtime_config['market_symbols']}"
+)
 
 # COMMAND ----------
 
@@ -68,7 +77,7 @@ API_SECRET = "5MnZMUeKU8EFaXFV6dHGUM1uS6kG8AgPXqCnaSjHVE2U"
 #print("⚠️  Using Fallback Credentials")
 
 client = StockHistoricalDataClient(API_KEY, API_SECRET)
-TICKERS = ["SPY", "QQQ"]
+TICKERS = runtime_config["market_symbols"]
 TARGET_TABLE = "pawan_quant_research_1.v4.bronze_rt_market_1h"
 
 # ── SNAPSHOT: Works pre-market, post-market, weekends ──

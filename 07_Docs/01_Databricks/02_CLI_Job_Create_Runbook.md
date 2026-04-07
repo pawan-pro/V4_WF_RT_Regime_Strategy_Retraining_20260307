@@ -28,6 +28,42 @@ databricks jobs create --json @"$WF_DIR/02_V4_Macro_Hourly_Maintenance.json"
 databricks jobs create --json @"$WF_DIR/03_V4_Monthly_Retraining.json"
 ```
 
+## Current Hourly Schedule
+
+- `01_V4_RT_Hourly_Chain.json` runs at `5` minutes past every hour in `America/New_York`
+- `02_V4_Macro_Hourly_Maintenance.json` runs at `15` minutes past every hour in `America/New_York`
+- Each task now retries up to `2` times with a `5` minute wait between attempts and retries on timeout enabled
+
+## Runtime Instrument Config
+
+The live hourly chain now reads its active instrument mapping from:
+
+`pawan_quant_research_1.v4.rt_runtime_instrument_config`
+
+That means you can switch the live symbols later without editing the notebooks or the job JSONs.
+
+Example: promote a futures or CFD-oriented mapping by inserting a newer config row:
+
+```sql
+INSERT INTO pawan_quant_research_1.v4.rt_runtime_instrument_config
+VALUES (
+  'futures_live',
+  'ES,NQ',
+  'ES',
+  'NQ',
+  'NQ',
+  'ES',
+  NULL,
+  'provider_to_be_wired',
+  'provider_to_be_wired',
+  'Prepared runtime mapping for futures rollout',
+  current_timestamp(),
+  current_user()
+);
+```
+
+The latest `updated_ts` row becomes active automatically on the next scheduled run.
+
 ## Delete Then Recreate
 
 Delete the older jobs first, then run the create commands above.

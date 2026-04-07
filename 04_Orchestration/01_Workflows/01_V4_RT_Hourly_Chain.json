@@ -2,7 +2,7 @@
   "name": "v4_rt_hourly_chain",
   "description": "Hourly live inference chain for V4 in pawan_quant_research_1.v4",
   "schedule": {
-    "quartz_cron_expression": "0 5 9-16 ? * MON-FRI",
+    "quartz_cron_expression": "0 5 * ? * *",
     "timezone_id": "America/New_York",
     "pause_status": "UNPAUSED"
   },
@@ -29,6 +29,9 @@
     {
       "task_key": "rt_01_market",
       "job_cluster_key": "v4_job_cluster",
+      "max_retries": 2,
+      "min_retry_interval_millis": 300000,
+      "retry_on_timeout": true,
       "libraries": [
         {"pypi": {"package": "alpaca-py==0.43.2"}},
         {"pypi": {"package": "nest_asyncio==1.6.0"}}
@@ -41,6 +44,9 @@
       "task_key": "rt_02_vix",
       "depends_on": [{"task_key": "rt_01_market"}],
       "job_cluster_key": "v4_job_cluster",
+      "max_retries": 2,
+      "min_retry_interval_millis": 300000,
+      "retry_on_timeout": true,
       "libraries": [
         {"pypi": {"package": "fredapi==0.5.2"}}
       ],
@@ -52,6 +58,9 @@
       "task_key": "rt_03_silver",
       "depends_on": [{"task_key": "rt_02_vix"}],
       "job_cluster_key": "v4_job_cluster",
+      "max_retries": 2,
+      "min_retry_interval_millis": 300000,
+      "retry_on_timeout": true,
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/03_RT_Silver_RT_Enrichment"
       }
@@ -60,6 +69,9 @@
       "task_key": "rt_04_inference",
       "depends_on": [{"task_key": "rt_03_silver"}],
       "job_cluster_key": "v4_job_cluster",
+      "max_retries": 2,
+      "min_retry_interval_millis": 300000,
+      "retry_on_timeout": true,
       "libraries": [
         {"pypi": {"package": "xgboost==3.1.1"}}
       ],
@@ -71,6 +83,9 @@
       "task_key": "rt_05_trade",
       "depends_on": [{"task_key": "rt_04_inference"}],
       "job_cluster_key": "v4_job_cluster",
+      "max_retries": 2,
+      "min_retry_interval_millis": 300000,
+      "retry_on_timeout": true,
       "libraries": [
         {"pypi": {"package": "alpaca-py==0.43.2"}}
       ],
@@ -82,6 +97,9 @@
       "task_key": "rt_06_audit",
       "depends_on": [{"task_key": "rt_05_trade"}],
       "job_cluster_key": "v4_job_cluster",
+      "max_retries": 2,
+      "min_retry_interval_millis": 300000,
+      "retry_on_timeout": true,
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/06_RT_Signal_Audit_Log"
       }
@@ -90,6 +108,9 @@
       "task_key": "rt_07_dashboard",
       "depends_on": [{"task_key": "rt_06_audit"}],
       "job_cluster_key": "v4_job_cluster",
+      "max_retries": 2,
+      "min_retry_interval_millis": 300000,
+      "retry_on_timeout": true,
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/07_RT_Dashboard_Feed"
       }
@@ -98,6 +119,9 @@
       "task_key": "rt_08_live_portfolio",
       "depends_on": [{"task_key": "rt_07_dashboard"}],
       "job_cluster_key": "v4_job_cluster",
+      "max_retries": 2,
+      "min_retry_interval_millis": 300000,
+      "retry_on_timeout": true,
       "notebook_task": {
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/02_Analysis/02_Dashboard/02_Live_Portfolio_Performance"
       }

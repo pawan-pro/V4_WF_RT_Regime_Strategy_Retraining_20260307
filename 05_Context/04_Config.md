@@ -99,11 +99,11 @@ VIX_SOURCE = "fred_1d"   # Options: "fred_1d" | "portara_1h"
 ```json
 {
   "hourly_chain": {
-    "schedule": "hourly on trading days shortly after bar close",
+    "schedule": "5 minutes past every hour, every day",
     "tasks": ["RT_01", "RT_02", "RT_03", "RT_04", "RT_05", "RT_06", "RT_07"]
   },
   "macro_hourly_maintenance": {
-    "schedule": "hourly on weekdays during US release windows",
+    "schedule": "15 minutes past every hour, every day",
     "tasks": ["macro_incremental", "silver_refresh"]
   },
   "monthly_retraining": {
@@ -112,6 +112,31 @@ VIX_SOURCE = "fred_1d"   # Options: "fred_1d" | "portara_1h"
   }
 }
 ```
+
+## Runtime Instrument Config
+
+The live chain now reads its active symbols and regime-to-instrument mapping from the Delta table below:
+
+```python
+RUNTIME_CONFIG_TABLE = "pawan_quant_research_1.v4.rt_runtime_instrument_config"
+```
+
+Default active row:
+
+```python
+{
+    "config_name": "default_live",
+    "market_symbols_csv": "SPY,QQQ",
+    "primary_symbol": "SPY",
+    "secondary_symbol": "QQQ",
+    "regime_0_ticker": "QQQ",
+    "regime_1_ticker": "SPY",
+    "regime_2_ticker": None,
+}
+```
+
+Operational rule:
+- Insert a newer row into `rt_runtime_instrument_config` to change the live instrument set without editing notebooks or workflow JSON.
 
 ## Python Dependencies
 

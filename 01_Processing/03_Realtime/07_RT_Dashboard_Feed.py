@@ -1,6 +1,8 @@
 # Databricks notebook source
 # RT_07: Dashboard Feed
 
+# MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config
+
 from datetime import datetime, timezone
 
 from pyspark.sql.types import (
@@ -23,6 +25,10 @@ MARKET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_market_1h"
 MACRO_TABLE = f"{CATALOG}.{SCHEMA}.bronze_bt_macro_events"
 MODEL_REGISTRY_TABLE = f"{CATALOG}.{SCHEMA}.model_registry_current"
 TARGET_TABLE = f"{CATALOG}.{SCHEMA}.gold_rt_dashboard_feed"
+runtime_config = load_runtime_instrument_config(spark, CATALOG, SCHEMA)
+PRIMARY_SYMBOL = runtime_config["primary_symbol"]
+SECONDARY_SYMBOL = runtime_config["secondary_symbol"]
+PRICE_SYMBOLS_SQL = ", ".join([f"'{symbol}'" for symbol in {PRIMARY_SYMBOL, SECONDARY_SYMBOL} if symbol])
 
 
 def maybe_float(value):
@@ -97,7 +103,7 @@ prices = spark.sql(
     f"""
     SELECT symbol, close
     FROM {MARKET_TABLE}
-    WHERE symbol IN ('SPY', 'QQQ')
+    WHERE symbol IN ({PRICE_SYMBOLS_SQL})
       AND timestamp = '{price_ts}'
     """
 ).collect()
@@ -239,8 +245,8 @@ dashboard_row = {
     "UMCSENT_z": maybe_float(silver["UMCSENT_z"]),
     "CPI_Event_Active": maybe_int(silver["CPI_Event_Active"]),
     "NFP_Event_Active": maybe_int(silver["NFP_Event_Active"]),
-    "SPY_close": price_map.get("SPY"),
-    "QQQ_close": price_map.get("QQQ"),
+    "SPY_close": price_map.get(PRIMARY_SYMBOL),
+    "QQQ_close": price_map.get(SECONDARY_SYMBOL),
     "account_equity": latest_equity,
     "account_cash": maybe_float(trade["account_cash"]),
     "positions_json": trade["positions_json"],
