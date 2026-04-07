@@ -1,0 +1,37 @@
+{
+  "name": "v4_saxo_token_refresher",
+  "description": "Standalone Saxo token refresher for V4 cutover",
+  "schedule": {
+    "quartz_cron_expression": "0 0/10 * ? * MON-FRI",
+    "timezone_id": "America/New_York",
+    "pause_status": "PAUSED"
+  },
+  "job_clusters": [
+    {
+      "job_cluster_key": "v4_job_cluster",
+      "new_cluster": {
+        "spark_version": "15.4.x-scala2.12",
+        "node_type_id": "i3.xlarge",
+        "num_workers": 1,
+        "data_security_mode": "SINGLE_USER",
+        "runtime_engine": "STANDARD",
+        "aws_attributes": {
+          "availability": "ON_DEMAND",
+          "ebs_volume_type": "GENERAL_PURPOSE_SSD",
+          "ebs_volume_count": 1,
+          "ebs_volume_size": 100
+        }
+      }
+    }
+  ],
+  "max_concurrent_runs": 1,
+  "tasks": [
+    {
+      "task_key": "saxo_token_refresh",
+      "job_cluster_key": "v4_job_cluster",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/05_Utilities/09_RT_Saxo_Token_Refresher_Standalone_Job"
+      }
+    }
+  ]
+}
