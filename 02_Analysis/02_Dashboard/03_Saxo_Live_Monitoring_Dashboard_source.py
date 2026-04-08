@@ -608,9 +608,18 @@ importance_map = dict(zip(importance_df["feature"], importance_df["importance_pc
 probability_df = compute_probabilities(main_df, model)
 main_df = pd.concat([main_df.reset_index(drop=True), probability_df.reset_index(drop=True)], axis=1)
 
-current_prob_cols = [column for column in PROBABILITY_COLUMNS.values() if column in main_df.columns]
-main_df["top_probability"] = main_df[current_prob_cols].max(axis=1) if current_prob_cols else np.nan
-main_df["top_probability_label"] = main_df[current_prob_cols].idxmax(axis=1).str.replace("prob_", "").str.replace("_", " ") if current_prob_cols else np.nan
+current_prob_cols = list(dict.fromkeys([column for column in PROBABILITY_COLUMNS.values() if column in main_df.columns]))
+probability_frame = (
+    pd.DataFrame({column: get_series(main_df, column) for column in current_prob_cols}, index=main_df.index)
+    if current_prob_cols
+    else pd.DataFrame(index=main_df.index)
+)
+main_df["top_probability"] = probability_frame.max(axis=1) if not probability_frame.empty else np.nan
+main_df["top_probability_label"] = (
+    probability_frame.idxmax(axis=1).str.replace("prob_", "").str.replace("_", " ")
+    if not probability_frame.empty
+    else np.nan
+)
 
 equity_df = main_df[main_df["account_equity"].notna() & main_df["SPY_close"].notna()].copy()
 if equity_df.empty:
@@ -913,11 +922,16 @@ display(
 if not transition_matrix_df.empty:
     display(transition_matrix_df)
 
-probability_plot_columns = [column for column in current_prob_cols if main_df[column].notna().any()]
+probability_plot_columns = [column for column in current_prob_cols if get_series(main_df, column).notna().any()]
 if probability_plot_columns:
     plt.figure(figsize=(16, 5))
     for column in probability_plot_columns:
-        plt.plot(main_df["as_of_ts"], main_df[column], label=column.replace("prob_", "").replace("_", " ").title(), linewidth=1.6)
+        plt.plot(
+            main_df["as_of_ts"],
+            get_series(main_df, column),
+            label=column.replace("prob_", "").replace("_", " ").title(),
+            linewidth=1.6,
+        )
     plt.axvline(main_df["as_of_ts"].iloc[-1], color="black", linestyle=":", alpha=0.5)
     plt.title("Historical Regime Probabilities")
     plt.ylabel("Probability")
