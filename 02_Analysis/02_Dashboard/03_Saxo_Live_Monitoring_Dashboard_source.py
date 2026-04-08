@@ -244,12 +244,27 @@ def safe_float(value):
 
 
 def safe_json_loads(payload):
-    if payload in (None, "", np.nan):
+    if isinstance(payload, pd.DataFrame):
+        payload = payload.bfill(axis=1).iloc[:, 0] if not payload.empty else None
+    if isinstance(payload, pd.Series):
+        payload = payload.dropna().iloc[0] if not payload.dropna().empty else None
+    if isinstance(payload, (list, dict)):
+        return payload
+    if payload is None or payload == "" or pd.isna(payload):
         return []
     try:
         return json.loads(payload)
     except Exception:
         return []
+
+
+def get_series(frame, column_name, default_value=np.nan):
+    if column_name not in frame.columns:
+        return pd.Series(default_value, index=frame.index)
+    values = frame.loc[:, column_name]
+    if isinstance(values, pd.DataFrame):
+        values = values.bfill(axis=1).iloc[:, 0]
+    return values
 
 
 def latest_model_metadata():
@@ -570,11 +585,11 @@ if "QQQ_close" not in main_df.columns:
     main_df["QQQ_close"] = np.nan
 
 if PRIMARY_SYMBOL in main_df.columns:
-    main_df["SPY_close"] = main_df["SPY_close"].fillna(main_df[PRIMARY_SYMBOL])
+    main_df["SPY_close"] = get_series(main_df, "SPY_close").fillna(get_series(main_df, PRIMARY_SYMBOL))
 if SECONDARY_SYMBOL in main_df.columns:
-    main_df["QQQ_close"] = main_df["QQQ_close"].fillna(main_df[SECONDARY_SYMBOL])
-main_df["target_position"] = main_df.get("target_position", main_df["position"]).fillna(main_df["position"])
-main_df["as_of_ts"] = main_df.get("trade_ts", main_df["timestamp"]).fillna(main_df["timestamp"])
+    main_df["QQQ_close"] = get_series(main_df, "QQQ_close").fillna(get_series(main_df, SECONDARY_SYMBOL))
+main_df["target_position"] = get_series(main_df, "target_position").fillna(get_series(main_df, "position"))
+main_df["as_of_ts"] = get_series(main_df, "trade_ts").fillna(get_series(main_df, "timestamp"))
 main_df = main_df.sort_values("as_of_ts").reset_index(drop=True)
 
 model, live_model_version, live_model_path = load_live_model()
@@ -669,7 +684,9 @@ switch_base["prev_regime"] = switch_base["regime_int"].shift(1)
 switch_base["prev_regime_name"] = switch_base["regime_name"].shift(1)
 switch_base["prev_position"] = switch_base["target_position"].shift(1)
 switch_base["switch_detected"] = (switch_base["regime_int"] != switch_base["prev_regime"]) & switch_base["prev_regime"].notna()
-switch_rows = switch_base[switch_base["switch_detected"] | switch_base["switched"].fillna(False)].copy()
+switched_series = get_series(switch_base, "switched", False).astype("boolean").fillna(False).astype(bool)
+switch_detected_series = get_series(switch_base, "switch_detected", False).astype(bool)
+switch_rows = switch_base[switch_detected_series | switched_series].copy()
 
 switch_records = []
 for idx, row in switch_rows.iterrows():
