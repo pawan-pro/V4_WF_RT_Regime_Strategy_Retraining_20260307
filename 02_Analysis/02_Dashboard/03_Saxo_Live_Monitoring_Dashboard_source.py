@@ -244,10 +244,7 @@ def safe_float(value):
 
 
 def safe_json_loads(payload):
-    if isinstance(payload, pd.DataFrame):
-        payload = payload.bfill(axis=1).iloc[:, 0] if not payload.empty else None
-    if isinstance(payload, pd.Series):
-        payload = payload.dropna().iloc[0] if not payload.dropna().empty else None
+    payload = scalar_value(payload, default=None)
     if isinstance(payload, (list, dict)):
         return payload
     if payload is None or payload == "" or pd.isna(payload):
@@ -265,6 +262,18 @@ def get_series(frame, column_name, default_value=np.nan):
     if isinstance(values, pd.DataFrame):
         values = values.bfill(axis=1).iloc[:, 0]
     return values
+
+
+def scalar_value(value, default=np.nan):
+    if isinstance(value, pd.DataFrame):
+        if value.empty:
+            return default
+        flattened = value.bfill(axis=1).iloc[:, 0]
+        return scalar_value(flattened, default=default)
+    if isinstance(value, pd.Series):
+        non_na = value.dropna()
+        return non_na.iloc[0] if not non_na.empty else default
+    return value
 
 
 def latest_model_metadata():
@@ -399,8 +408,8 @@ def feature_driver_text(current_row, previous_row, importance_map):
 
     scored = []
     for feature in FEATURES:
-        cur_value = safe_float(current_row.get(feature))
-        prev_value = safe_float(previous_row.get(feature))
+        cur_value = safe_float(scalar_value(current_row.get(feature)))
+        prev_value = safe_float(scalar_value(previous_row.get(feature)))
         if np.isnan(cur_value) and np.isnan(prev_value):
             continue
         delta = cur_value - prev_value
@@ -421,7 +430,7 @@ def feature_driver_text(current_row, previous_row, importance_map):
 def build_monitoring_summary(latest_row, perf_lookback_row, latest_positions, latest_switch):
     probability_pairs = []
     for column in PROBABILITY_COLUMNS.values():
-        value = latest_row.get(column)
+        value = scalar_value(latest_row.get(column))
         if pd.notna(value):
             probability_pairs.append((column, value))
     probability_pairs = sorted(probability_pairs, key=lambda row: row[1], reverse=True)
@@ -431,11 +440,11 @@ def build_monitoring_summary(latest_row, perf_lookback_row, latest_positions, la
         else "probability unavailable"
     )
 
-    latest_regime = f"{latest_row['regime_name']} ({int(latest_row['regime_int'])})"
-    equity = latest_row.get("account_equity")
-    balance = latest_row.get("account_balance")
-    two_week_return = perf_lookback_row.get("strategy_return_pct")
-    benchmark_return = perf_lookback_row.get("benchmark_return_pct")
+    latest_regime = f"{scalar_value(latest_row['regime_name'])} ({int(scalar_value(latest_row['regime_int']))})"
+    equity = scalar_value(latest_row.get("account_equity"))
+    balance = scalar_value(latest_row.get("account_balance"))
+    two_week_return = scalar_value(perf_lookback_row.get("strategy_return_pct"))
+    benchmark_return = scalar_value(perf_lookback_row.get("benchmark_return_pct"))
     open_positions = latest_positions.shape[0]
     switch_text = latest_switch["drivers"] if latest_switch is not None else "No completed switch explanation yet"
     balance_text = f"{balance:,.2f}" if pd.notna(balance) else "N/A"
@@ -607,8 +616,8 @@ equity_df = main_df[main_df["account_equity"].notna() & main_df["SPY_close"].not
 if equity_df.empty:
     raise ValueError("No account equity history found in Saxo trade log.")
 
-starting_equity = INITIAL_BALANCE_OVERRIDE or float(equity_df["account_equity"].iloc[0])
-starting_spy_price = float(equity_df["SPY_close"].iloc[0])
+starting_equity = INITIAL_BALANCE_OVERRIDE if INITIAL_BALANCE_OVERRIDE is not None else float(scalar_value(equity_df["account_equity"].iloc[0]))
+starting_spy_price = float(scalar_value(equity_df["SPY_close"].iloc[0]))
 equity_df["strategy_value"] = equity_df["account_equity"].astype(float)
 equity_df["spy_benchmark"] = starting_equity * equity_df["SPY_close"].astype(float) / starting_spy_price
 equity_df["strategy_return_pct"] = equity_df["strategy_value"] / equity_df["strategy_value"].iloc[0] - 1.0
@@ -639,8 +648,8 @@ previous_row = main_df.iloc[-2] if main_df.shape[0] > 1 else None
 
 feature_snapshot_rows = []
 for feature in FEATURES:
-    cur_value = safe_float(latest_row.get(feature))
-    prev_value = safe_float(previous_row.get(feature)) if previous_row is not None else np.nan
+    cur_value = safe_float(scalar_value(latest_row.get(feature)))
+    prev_value = safe_float(scalar_value(previous_row.get(feature))) if previous_row is not None else np.nan
     delta_value = cur_value - prev_value if previous_row is not None else np.nan
     feature_snapshot_rows.append(
         {
@@ -692,26 +701,28 @@ switch_records = []
 for idx, row in switch_rows.iterrows():
     previous_switch_row = switch_base.iloc[idx - 1] if idx > 0 else None
     prior_switch_snapshot = switch_rows[switch_rows["as_of_ts"] < row["as_of_ts"]].tail(1)
-    previous_switch_ts = prior_switch_snapshot["as_of_ts"].iloc[0] if not prior_switch_snapshot.empty else pd.NaT
-    previous_switch_equity = prior_switch_snapshot["account_equity"].iloc[0] if not prior_switch_snapshot.empty else np.nan
-    previous_switch_benchmark = prior_switch_snapshot["SPY_close"].iloc[0] if not prior_switch_snapshot.empty else np.nan
+    previous_switch_ts = scalar_value(prior_switch_snapshot["as_of_ts"], default=pd.NaT) if not prior_switch_snapshot.empty else pd.NaT
+    previous_switch_equity = safe_float(scalar_value(prior_switch_snapshot["account_equity"])) if not prior_switch_snapshot.empty else np.nan
+    previous_switch_benchmark = safe_float(scalar_value(prior_switch_snapshot["SPY_close"])) if not prior_switch_snapshot.empty else np.nan
+    row_account_equity = safe_float(scalar_value(row.get("account_equity")))
+    row_spy_close = safe_float(scalar_value(row.get("SPY_close")))
     strategy_since_last_switch = (
-        row["account_equity"] / previous_switch_equity - 1.0
+        row_account_equity / previous_switch_equity - 1.0
         if pd.notna(previous_switch_equity) and previous_switch_equity not in (0, np.nan)
         else np.nan
     )
     benchmark_since_last_switch = (
-        row["SPY_close"] / previous_switch_benchmark - 1.0
+        row_spy_close / previous_switch_benchmark - 1.0
         if pd.notna(previous_switch_benchmark) and previous_switch_benchmark not in (0, np.nan)
         else np.nan
     )
     switch_records.append(
         {
             "switch_ts": row["as_of_ts"],
-            "from_regime": row["prev_regime_name"],
-            "to_regime": row["regime_name"],
-            "from_position": row["prev_position"],
-            "to_position": row["target_position"],
+            "from_regime": scalar_value(row["prev_regime_name"]),
+            "to_regime": scalar_value(row["regime_name"]),
+            "from_position": scalar_value(row["prev_position"]),
+            "to_position": scalar_value(row["target_position"]),
             "hours_since_last_switch": (
                 (row["as_of_ts"] - previous_switch_ts).total_seconds() / 3600
                 if pd.notna(previous_switch_ts)
@@ -719,7 +730,7 @@ for idx, row in switch_rows.iterrows():
             ),
             "strategy_return_since_last_switch": strategy_since_last_switch,
             "spy_return_since_last_switch": benchmark_since_last_switch,
-            "probability_on_switch": row.get("top_probability"),
+            "probability_on_switch": safe_float(scalar_value(row.get("top_probability"))),
             "drivers": feature_driver_text(row, previous_switch_row, importance_map),
         }
     )
@@ -745,18 +756,18 @@ recent_feature_df = main_df[main_df["as_of_ts"] >= recent_feature_cutoff].copy()
 
 summary_kpis_df = pd.DataFrame(
     [
-        {"metric": "Latest regime", "value": f"{latest_row['regime_name']} ({int(latest_row['regime_int'])})"},
-        {"metric": "Latest target position", "value": latest_row["target_position"]},
-        {"metric": "Latest top probability", "value": f"{latest_row['top_probability']:.2%}" if pd.notna(latest_row["top_probability"]) else "N/A"},
-        {"metric": "Account balance", "value": f"{latest_row['account_balance']:,.2f}" if pd.notna(latest_row["account_balance"]) else "N/A"},
-        {"metric": "Account equity", "value": f"{latest_row['account_equity']:,.2f}" if pd.notna(latest_row["account_equity"]) else "N/A"},
+        {"metric": "Latest regime", "value": f"{scalar_value(latest_row['regime_name'])} ({int(scalar_value(latest_row['regime_int']))})"},
+        {"metric": "Latest target position", "value": scalar_value(latest_row["target_position"])},
+        {"metric": "Latest top probability", "value": f"{safe_float(scalar_value(latest_row['top_probability'])):.2%}" if pd.notna(safe_float(scalar_value(latest_row['top_probability']))) else "N/A"},
+        {"metric": "Account balance", "value": f"{safe_float(scalar_value(latest_row['account_balance'])):,.2f}" if pd.notna(safe_float(scalar_value(latest_row['account_balance']))) else "N/A"},
+        {"metric": "Account equity", "value": f"{safe_float(scalar_value(latest_row['account_equity'])):,.2f}" if pd.notna(safe_float(scalar_value(latest_row['account_equity']))) else "N/A"},
         {"metric": f"Saxo return ({LOOKBACK_DAYS}D)", "value": f"{recent_perf_df['strategy_return_pct'].iloc[-1]:+.2%}" if recent_perf_df.shape[0] >= 2 else "N/A"},
         {"metric": f"SPY return ({LOOKBACK_DAYS}D)", "value": f"{recent_perf_df['benchmark_return_pct'].iloc[-1]:+.2%}" if recent_perf_df.shape[0] >= 2 else "N/A"},
         {"metric": "Live alpha since inception", "value": f"{latest_equity_row['alpha_pct']:+.2%}"},
-        {"metric": "Open positions", "value": int(latest_row["positions_count"]) if pd.notna(latest_row["positions_count"]) else 0},
-        {"metric": "PIT lag days", "value": int(latest_row["pit_lag_days"]) if pd.notna(latest_row.get("pit_lag_days")) else "N/A"},
-        {"metric": "Bias gate passed", "value": bool(latest_row["bias_gate_passed"]) if pd.notna(latest_row.get("bias_gate_passed")) else "N/A"},
-        {"metric": "Model version", "value": latest_row.get("model_version", live_model_version)},
+        {"metric": "Open positions", "value": int(scalar_value(latest_row["positions_count"])) if pd.notna(scalar_value(latest_row["positions_count"])) else 0},
+        {"metric": "PIT lag days", "value": int(scalar_value(latest_row.get("pit_lag_days"))) if pd.notna(scalar_value(latest_row.get("pit_lag_days"))) else "N/A"},
+        {"metric": "Bias gate passed", "value": bool(scalar_value(latest_row["bias_gate_passed"])) if pd.notna(scalar_value(latest_row.get("bias_gate_passed"))) else "N/A"},
+        {"metric": "Model version", "value": scalar_value(latest_row.get("model_version", live_model_version), default=live_model_version)},
     ]
 )
 
