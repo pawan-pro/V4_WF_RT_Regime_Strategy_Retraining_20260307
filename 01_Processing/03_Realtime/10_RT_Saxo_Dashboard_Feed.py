@@ -6,6 +6,8 @@
 
 from datetime import datetime, timezone
 
+import matplotlib.pyplot as plt
+import pandas as pd
 from pyspark.sql.types import (
     DoubleType,
     IntegerType,
@@ -64,6 +66,77 @@ def get_model_version(default_version):
         if rows:
             return rows[0]["model_version"]
     return default_version
+
+
+def load_performance_history():
+    history = spark.sql(
+        f"""
+        SELECT
+            trade_ts,
+            signal_ts,
+            regime_int,
+            regime_name,
+            account_equity,
+            spy_close
+        FROM {TRADE_LOG}
+        WHERE account_equity IS NOT NULL
+          AND spy_close IS NOT NULL
+        ORDER BY trade_ts
+        """
+    ).toPandas()
+
+    if history.empty:
+        return history
+
+    history["trade_ts"] = pd.to_datetime(history["trade_ts"])
+    history["signal_ts"] = pd.to_datetime(history["signal_ts"])
+    history["account_equity"] = history["account_equity"].astype(float)
+    history["spy_close"] = history["spy_close"].astype(float)
+
+    initial_equity = float(history["account_equity"].iloc[0])
+    initial_spy_close = float(history["spy_close"].iloc[0])
+
+    history["strategy_value"] = history["account_equity"]
+    history["spy_benchmark"] = initial_equity * history["spy_close"] / initial_spy_close
+    history["strategy_return_pct"] = history["strategy_value"] / initial_equity - 1.0
+    history["benchmark_return_pct"] = history["spy_benchmark"] / initial_equity - 1.0
+    history["alpha_pct"] = history["strategy_return_pct"] - history["benchmark_return_pct"]
+
+    return history
+
+
+def render_performance_chart(performance_history):
+    if performance_history.empty or performance_history.shape[0] < 2:
+        print("Not enough Saxo history to render performance chart.")
+        return
+
+    chart_df = performance_history.sort_values("trade_ts").reset_index(drop=True).copy()
+
+    fig, (ax1, ax2) = plt.subplots(
+        2,
+        1,
+        figsize=(16, 8),
+        gridspec_kw={"height_ratios": [4, 1]},
+        sharex=True,
+    )
+
+    ax1.plot(chart_df["trade_ts"], chart_df["strategy_value"], label="Saxo Strategy", linewidth=2)
+    ax1.plot(chart_df["trade_ts"], chart_df["spy_benchmark"], label="SPY Benchmark", alpha=0.75)
+    ax1.set_title("Saxo Live Portfolio Performance vs SPY")
+    ax1.set_ylabel("Portfolio Value")
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    regimes = chart_df["regime_int"]
+    ax2.fill_between(chart_df["trade_ts"], 0, 1, where=(regimes == 0), color="green", alpha=0.35, label="Expansion")
+    ax2.fill_between(chart_df["trade_ts"], 0, 1, where=(regimes == 1), color="gold", alpha=0.35, label="Slowdown")
+    ax2.fill_between(chart_df["trade_ts"], 0, 1, where=(regimes == 2), color="red", alpha=0.35, label="Recession")
+    ax2.set_yticks([])
+    ax2.set_ylabel("Regime")
+    ax2.legend(loc="upper right")
+
+    plt.tight_layout()
+    plt.show()
 
 
 signal = spark.sql(
@@ -169,6 +242,12 @@ vix_source_date = spark.sql(
 
 dashboard_ts = datetime.now(timezone.utc).replace(tzinfo=None)
 model_version = get_model_version(signal_data.get("model_version") or "bootstrap_live_model")
+performance_history = load_performance_history()
+latest_alpha_pct = (
+    float(performance_history["alpha_pct"].iloc[-1])
+    if not performance_history.empty
+    else None
+)
 
 schema = StructType(
     [
@@ -211,6 +290,7 @@ schema = StructType(
         StructField("day_pnl", DoubleType(), True),
         StructField("day_pnl_pct", DoubleType(), True),
         StructField("total_return_pct", DoubleType(), True),
+        StructField("alpha_pct", DoubleType(), True),
         StructField("drawdown_pct", DoubleType(), True),
         StructField("total_cycles", IntegerType(), True),
         StructField("total_switches", IntegerType(), True),
@@ -266,6 +346,7 @@ dashboard_row = {
     "day_pnl": maybe_float(trade["day_pnl"]),
     "day_pnl_pct": maybe_float(trade["day_pnl_pct"]),
     "total_return_pct": total_return_pct,
+    "alpha_pct": latest_alpha_pct,
     "drawdown_pct": drawdown_pct,
     "total_cycles": maybe_int(portfolio_stats["total_cycles"]),
     "total_switches": maybe_int(portfolio_stats["total_switches"]),
@@ -288,6 +369,8 @@ overwrite_dataframe_with_retry(
     operation_name=f"overwrite Saxo dashboard feed table {TARGET_TABLE}",
 )
 
+render_performance_chart(performance_history)
+
 print(f"Saxo dashboard feed written to {TARGET_TABLE}")
 print(f"Dashboard timestamp: {dashboard_ts}")
 print(f"Execution mode: {trade['execution_mode']}")
@@ -296,3 +379,7 @@ print(f"Target allocation: {dashboard_row['position']}")
 print(f"Account balance: {dashboard_row['account_balance']}")
 print(f"Account equity: {dashboard_row['account_equity']}")
 print(f"Hourly PnL: {dashboard_row['hourly_pnl']}")
+print(
+    "Alpha pct: "
+    + (f"{dashboard_row['alpha_pct']:+.2%}" if dashboard_row["alpha_pct"] is not None else "N/A")
+)
