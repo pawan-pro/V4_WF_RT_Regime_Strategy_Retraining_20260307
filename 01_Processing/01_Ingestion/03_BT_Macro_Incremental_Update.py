@@ -7,6 +7,8 @@
 import finnhub
 import pandas as pd
 import pytz
+import requests
+import time
 from datetime import datetime, timedelta
 from fredapi import Fred
 from pyspark.sql import functions as F
@@ -17,6 +19,9 @@ SCHEMA = "v4"
 TARGET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_bt_macro_events"
 VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/market_data"
 LOOKBACK_DAYS = 90
+ALFRED_RETRY_ATTEMPTS = 3
+ALFRED_RETRY_BASE_SECONDS = 2
+FRED_API_BASE_URL = "https://api.stlouisfed.org/fred"
 
 FINNHUB_API_KEY = "d5s3pchr01qoo9r2f3h0d5s3pchr01qoo9r2f3hg"
 FRED_API_KEY = "f52bdf7341f23d0458820ecd806178db"
@@ -85,21 +90,79 @@ calendar_df = calendar_df[
 ].copy()
 calendar_df["release_date"] = pd.to_datetime(calendar_df["time"]).dt.date
 
+alfred_release_cache = {}
+
+def load_alfred_releases(series_id):
+    if series_id in alfred_release_cache:
+        return alfred_release_cache[series_id]
+
+    last_error = None
+    for attempt in range(ALFRED_RETRY_ATTEMPTS):
+        try:
+            vintages = fred.get_series_all_releases(series_id).copy()
+            vintages["realtime_start"] = pd.to_datetime(vintages["realtime_start"]).dt.date
+            vintages["value"] = pd.to_numeric(vintages["value"], errors="coerce")
+            vintages = vintages.dropna(subset=["value"])
+            alfred_release_cache[series_id] = vintages
+            return vintages
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < ALFRED_RETRY_ATTEMPTS:
+                time.sleep(ALFRED_RETRY_BASE_SECONDS * (2 ** attempt))
+
+    print(f"ALFRED release fetch failed for {series_id}: {last_error}")
+    alfred_release_cache[series_id] = pd.DataFrame()
+    return alfred_release_cache[series_id]
+
 def get_alfred_first_release(series_id, release_date):
-    try:
-        vintages = fred.get_series_all_releases(series_id)
-        match = vintages[vintages["realtime_start"] == release_date]
-        if not match.empty:
-            return float(match.iloc[0]["value"])
-    except Exception:
+    vintages = load_alfred_releases(series_id)
+    if vintages.empty:
         return None
+    match = vintages[vintages["realtime_start"] == pd.to_datetime(release_date).date()]
+    if not match.empty:
+        return float(match.iloc[0]["value"])
     return None
+
+def discover_release_dates(series_id, indicator_events):
+    release_dates = {
+        release_date
+        for release_date in indicator_events["release_date"].tolist()
+    }
+
+    last_error = None
+    for attempt in range(ALFRED_RETRY_ATTEMPTS):
+        try:
+            resp = requests.get(
+                f"{FRED_API_BASE_URL}/series/vintagedates",
+                params={
+                    "series_id": series_id,
+                    "api_key": FRED_API_KEY,
+                    "file_type": "json",
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            vintage_dates = resp.json().get("vintage_dates", [])
+            release_dates.update(
+                release_date
+                for release_date in pd.to_datetime(vintage_dates).date
+                if window_start <= release_date <= window_end
+            )
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < ALFRED_RETRY_ATTEMPTS:
+                time.sleep(ALFRED_RETRY_BASE_SECONDS * (2 ** attempt))
+    else:
+        print(f"ALFRED vintage-date fetch failed for {series_id}: {last_error}")
+
+    return sorted(release_dates)
 
 def apply_precise_timing(indicator_id, release_date):
     wall_clock_time = TYPICAL_TIMES.get(indicator_id, "08:30:00")
     naive_dt = datetime.strptime(f"{release_date} {wall_clock_time}", "%Y-%m-%d %H:%M:%S")
     eastern = pytz.timezone("US/Eastern")
-    localized_dt = eastern.localize(naive_dt, ambiguous="infer")
+    localized_dt = eastern.localize(naive_dt)
     return localized_dt.astimezone(pytz.utc).replace(tzinfo=None)
 
 rows = []
@@ -116,8 +179,11 @@ for indicator_id, vendor_names in INDICATOR_MAP.items():
         """).collect()
         seen_dates = {row["release_date"] for row in existing}
 
-    for _, event_row in indicator_events.iterrows():
-        release_date = event_row["release_date"]
+    release_dates = discover_release_dates(indicator_id, indicator_events)
+    if not release_dates and indicator_events.empty:
+        print(f"No Finnhub or ALFRED release dates found for {indicator_id} in lookback window")
+
+    for release_date in release_dates:
         if release_date in seen_dates:
             continue
         actual = get_alfred_first_release(indicator_id, str(release_date))
