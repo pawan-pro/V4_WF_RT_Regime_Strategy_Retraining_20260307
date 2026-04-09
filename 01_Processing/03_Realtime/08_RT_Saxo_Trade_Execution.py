@@ -40,6 +40,9 @@ TARGET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_saxo_trade_log"
 
 NOTIONAL_FRACTION = 0.95
 ALIGNMENT_TOLERANCE_PCT = 0.02
+SAXO_RETRY_MAX_ATTEMPTS = 4
+SAXO_RETRY_BASE_SECONDS = 1.0
+SAXO_RETRY_MAX_SECONDS = 8.0
 
 runtime_config = load_runtime_instrument_config(spark, CATALOG, SCHEMA)
 PRIMARY_SYMBOL = runtime_config["primary_symbol"]
@@ -83,6 +86,10 @@ TRADE_COLUMNS = {
 }
 
 NY_TZ = ZoneInfo("America/New_York")
+
+
+class SaxoTemporaryThrottleError(RuntimeError):
+    pass
 
 
 try:
@@ -190,12 +197,90 @@ def get_access_token_readonly():
     return state["access_token"]
 
 
-def request_json(method, url, headers, payload=None):
-    resp = requests.request(method, url, headers=headers, json=payload, timeout=30)
+def extract_error_info(payload):
+    if not isinstance(payload, dict):
+        return None
+    error_info = payload.get("ErrorInfo")
+    if not isinstance(error_info, dict):
+        return None
+
+    error_code = error_info.get("ErrorCode")
+    message = error_info.get("Message")
+    if error_code in (None, "", "None", "Ok") and not message:
+        return None
+
+    return {
+        "code": error_code or "UnknownError",
+        "message": message or "",
+    }
+
+
+def is_rate_limited(status_code, payload, response_text):
+    if status_code == 429:
+        return True
+
+    error_info = extract_error_info(payload)
+    if error_info and error_info["code"] == "RateLimitExceeded":
+        return True
+
+    return "rate limit exceeded" in (response_text or "").lower()
+
+
+def saxo_request(method, url, headers, payload=None, timeout=30, action_name="request"):
+    last_status = None
+    last_payload = {}
+    last_text = ""
+
+    for attempt in range(1, SAXO_RETRY_MAX_ATTEMPTS + 1):
+        resp = requests.request(method, url, headers=headers, json=payload, timeout=timeout)
+        response_text = resp.text or ""
+        response_payload = safe_json_loads(response_text) or {}
+
+        if not is_rate_limited(resp.status_code, response_payload, response_text):
+            return resp, response_payload, attempt - 1
+
+        last_status = resp.status_code
+        last_payload = response_payload
+        last_text = response_text
+
+        if attempt == SAXO_RETRY_MAX_ATTEMPTS:
+            error_info = extract_error_info(response_payload) or {
+                "code": "RateLimitExceeded",
+                "message": response_text[:500],
+            }
+            raise SaxoTemporaryThrottleError(
+                f"Saxo {action_name} deferred after {attempt} attempts: "
+                f"{error_info['code']} - {error_info['message']}"
+            )
+
+        wait_seconds = min(
+            SAXO_RETRY_BASE_SECONDS * (2 ** (attempt - 1)),
+            SAXO_RETRY_MAX_SECONDS,
+        )
+        print(
+            f"Saxo {action_name} rate-limited on attempt {attempt}/"
+            f"{SAXO_RETRY_MAX_ATTEMPTS}; sleeping {wait_seconds:.1f}s"
+        )
+        time.sleep(wait_seconds)
+
+    raise SaxoTemporaryThrottleError(
+        f"Saxo {action_name} deferred: status={last_status} payload={json.dumps(last_payload)[:500] or last_text[:500]}"
+    )
+
+
+def request_json(method, url, headers, payload=None, action_name="request"):
+    resp, response_payload, retry_count = saxo_request(
+        method,
+        url,
+        headers,
+        payload=payload,
+        timeout=30,
+        action_name=action_name,
+    )
     resp.raise_for_status()
-    if not resp.text:
-        return {}
-    return resp.json()
+    if retry_count:
+        print(f"Saxo {action_name} succeeded after {retry_count} retries")
+    return response_payload
 
 
 def fetch_positions(headers):
@@ -203,6 +288,7 @@ def fetch_positions(headers):
         "GET",
         f"{BASE_URL}/port/v1/positions/me?ClientKey={CLIENT_KEY}",
         headers,
+        action_name="fetch_positions",
     )
 
 
@@ -211,6 +297,7 @@ def fetch_balance(headers):
         "GET",
         f"{BASE_URL}/port/v1/balances/me?ClientKey={CLIENT_KEY}&AccountKey={ACCOUNT_KEY}",
         headers,
+        action_name="fetch_balance",
     )
 
 
@@ -219,6 +306,7 @@ def get_price(headers, uic, asset_type):
         "GET",
         f"{BASE_URL}/trade/v1/infoprices?Uic={uic}&AssetType={asset_type}",
         headers,
+        action_name=f"get_price:{uic}",
     )
     quote = quote_payload.get("Quote", {})
     return safe_float(
@@ -407,24 +495,6 @@ def ensure_order_submission(order_result):
     )
 
 
-def extract_error_info(payload):
-    if not isinstance(payload, dict):
-        return None
-    error_info = payload.get("ErrorInfo")
-    if not isinstance(error_info, dict):
-        return None
-
-    error_code = error_info.get("ErrorCode")
-    message = error_info.get("Message")
-    if error_code in (None, "", "None", "Ok") and not message:
-        return None
-
-    return {
-        "code": error_code or "UnknownError",
-        "message": message or "",
-    }
-
-
 def precheck_market_buy(headers, target_asset, qty):
     order = {
         "AccountKey": ACCOUNT_KEY,
@@ -436,13 +506,14 @@ def precheck_market_buy(headers, target_asset, qty):
         "ManualOrder": False,
         "OrderDuration": {"DurationType": "DayOrder"},
     }
-    resp = requests.post(
+    resp, payload, retry_count = saxo_request(
+        "POST",
         f"{BASE_URL}/trade/v2/orders/precheck",
-        headers=headers,
-        json=order,
+        headers,
+        payload=order,
         timeout=30,
+        action_name=f"precheck_buy:{target_asset['symbol']}:{qty}",
     )
-    payload = safe_json_loads(resp.text) or {}
     return {
         "action": "precheck_buy",
         "uic": target_asset["Uic"],
@@ -452,14 +523,15 @@ def precheck_market_buy(headers, target_asset, qty):
         "status_code": resp.status_code,
         "response": resp.text,
         "payload": payload,
+        "retry_count": retry_count,
     }
 
 
-def affordable_buy_qty(headers, target_asset, desired_qty):
+def affordable_buy_qty(headers, target_asset, desired_qty, initial_precheck=None):
     if desired_qty <= 0:
         return 0, None, None
 
-    latest_precheck = precheck_market_buy(headers, target_asset, desired_qty)
+    latest_precheck = initial_precheck or precheck_market_buy(headers, target_asset, desired_qty)
     if latest_precheck["status_code"] < 200 or latest_precheck["status_code"] >= 300:
         raise RuntimeError(
             f"Saxo precheck failed for {target_asset['symbol']} qty={desired_qty}: "
@@ -520,11 +592,13 @@ def close_position(headers, position_row):
         "ManualOrder": True,
         "OrderDuration": {"DurationType": "DayOrder"},
     }
-    resp = requests.post(
+    resp, _, retry_count = saxo_request(
+        "POST",
         f"{BASE_URL}/trade/v2/orders",
-        headers=headers,
-        json=order,
+        headers,
+        payload=order,
         timeout=30,
+        action_name=f"close:{position_row['symbol']}",
     )
     return {
         "action": "close",
@@ -534,6 +608,7 @@ def close_position(headers, position_row):
         "amount": abs(position_row["amount"]),
         "status_code": resp.status_code,
         "response": resp.text,
+        "retry_count": retry_count,
     }
 
 
@@ -548,11 +623,13 @@ def place_market_buy(headers, target_asset, qty):
         "ManualOrder": False,
         "OrderDuration": {"DurationType": "DayOrder"},
     }
-    resp = requests.post(
+    resp, _, retry_count = saxo_request(
+        "POST",
         f"{BASE_URL}/trade/v2/orders",
-        headers=headers,
-        json=order,
+        headers,
+        payload=order,
         timeout=30,
+        action_name=f"buy:{target_asset['symbol']}:{qty}",
     )
     return {
         "action": "buy",
@@ -562,6 +639,7 @@ def place_market_buy(headers, target_asset, qty):
         "amount": qty,
         "status_code": resp.status_code,
         "response": resp.text,
+        "retry_count": retry_count,
     }
 
 
@@ -597,10 +675,6 @@ headers = {
     "Accept": "application/json",
 }
 
-auth_test = requests.get(f"{BASE_URL}/port/v1/users/me", headers=headers, timeout=30)
-if auth_test.status_code != 200:
-    raise RuntimeError(f"Saxo auth failed: {auth_test.text}")
-
 signal = spark.sql(
     f"""
     SELECT *
@@ -621,6 +695,8 @@ pre_positions_payload = fetch_positions(headers)
 pre_active_positions = active_positions(pre_positions_payload)
 pre_balance_payload = fetch_balance(headers)
 pre_balance = extract_balance_metrics(pre_balance_payload)
+latest_positions_payload = pre_positions_payload
+latest_balance_payload = pre_balance_payload
 
 last_mode_equity_row = spark.sql(
     f"""
@@ -703,6 +779,7 @@ else:
                     time.sleep(1)
 
                 refreshed_positions_payload = fetch_positions(headers)
+                latest_positions_payload = refreshed_positions_payload
                 refreshed_active_positions = active_positions(refreshed_positions_payload)
                 refreshed_target_row = find_target_position(refreshed_active_positions, target_asset)
                 refreshed_target_qty = (
@@ -710,6 +787,7 @@ else:
                 )
 
                 refreshed_balance_payload = fetch_balance(headers)
+                latest_balance_payload = refreshed_balance_payload
                 refreshed_balance = extract_balance_metrics(refreshed_balance_payload)
                 refreshed_target_value = safe_float(refreshed_balance["account_equity"]) or safe_float(
                     pre_balance["account_equity"]
@@ -767,10 +845,12 @@ else:
                     )
                 else:
                     requested_qty = max(0, desired_qty - int(refreshed_target_qty))
+                    initial_requested_precheck = unit_precheck if requested_qty == 1 else None
                     qty, affordable_precheck, insufficient_precheck = affordable_buy_qty(
                         headers,
                         target_asset,
                         requested_qty,
+                        initial_precheck=initial_requested_precheck,
                     )
                     if requested_qty > 0 and qty < requested_qty:
                         insufficient_payload = (
@@ -808,14 +888,49 @@ else:
                                 "spending_power": refreshed_balance.get("account_spending_power"),
                             }
                         )
+    except SaxoTemporaryThrottleError as exc:
+        orders_placed.append(
+            {
+                "action": "defer",
+                "message": str(exc),
+                "reason": "rate_limit",
+                "retryable": True,
+            }
+        )
     except Exception as exc:
         execution_error = str(exc)
         orders_placed.append({"action": "error", "message": execution_error})
 
 time.sleep(2)
 
-post_positions_payload = fetch_positions(headers)
-post_balance_payload = fetch_balance(headers)
+try:
+    post_positions_payload = fetch_positions(headers)
+    latest_positions_payload = post_positions_payload
+except SaxoTemporaryThrottleError as exc:
+    post_positions_payload = latest_positions_payload
+    orders_placed.append(
+        {
+            "action": "snapshot_defer",
+            "message": str(exc),
+            "reason": "rate_limit",
+            "snapshot": "positions",
+        }
+    )
+
+try:
+    post_balance_payload = fetch_balance(headers)
+    latest_balance_payload = post_balance_payload
+except SaxoTemporaryThrottleError as exc:
+    post_balance_payload = latest_balance_payload
+    orders_placed.append(
+        {
+            "action": "snapshot_defer",
+            "message": str(exc),
+            "reason": "rate_limit",
+            "snapshot": "balance",
+        }
+    )
+
 post_balance = extract_balance_metrics(post_balance_payload)
 position_snapshot = serialize_positions(post_positions_payload)
 
