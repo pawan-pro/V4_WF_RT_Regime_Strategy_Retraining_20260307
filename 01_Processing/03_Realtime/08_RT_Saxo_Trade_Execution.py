@@ -235,15 +235,26 @@ def active_positions(positions_payload):
     rows = []
     for position in positions_payload.get("Data", []):
         base = position.get("PositionBase", {})
+        net_view = position.get("NetPositionView", {})
+        position_view = position.get("PositionView", {})
         amount = safe_float(base.get("Amount")) or 0.0
         if amount == 0.0:
             continue
+        market_value = safe_float(
+            first_present(
+                position.get("MarketValue"),
+                net_view.get("MarketValue"),
+                position_view.get("MarketValue"),
+                net_view.get("Exposure"),
+            )
+        )
         rows.append(
             {
                 "raw": position,
                 "amount": amount,
                 "uic": base.get("Uic"),
                 "asset_type": base.get("AssetType"),
+                "market_value": market_value,
                 "symbol": first_present(base.get("Symbol"), position.get("DisplayAndFormat", {}).get("Symbol"), str(base.get("Uic"))),
             }
         )
@@ -345,6 +356,16 @@ def extract_balance_metrics(balance_payload):
         "account_equity": account_equity,
         "account_balance": account_balance,
         "account_cash": account_balance,
+        "account_currency": balance_payload.get("Currency"),
+        "account_spending_power": safe_float(
+            first_present(
+                balance_payload.get("SpendingPower"),
+                balance_payload.get("MarginAvailableForTrading"),
+                balance_payload.get("CashAvailableForTrading"),
+                balance_payload.get("AvailableFunds"),
+                balance_payload.get("CashBalance"),
+            )
+        ),
         "day_pnl": day_pnl,
     }
 
@@ -384,6 +405,107 @@ def ensure_order_submission(order_result):
         f"Saxo {order_result.get('action')} order failed with status "
         f"{status_code}: {response_text[:500]}"
     )
+
+
+def extract_error_info(payload):
+    if not isinstance(payload, dict):
+        return None
+    error_info = payload.get("ErrorInfo")
+    if not isinstance(error_info, dict):
+        return None
+
+    error_code = error_info.get("ErrorCode")
+    message = error_info.get("Message")
+    if error_code in (None, "", "None", "Ok") and not message:
+        return None
+
+    return {
+        "code": error_code or "UnknownError",
+        "message": message or "",
+    }
+
+
+def precheck_market_buy(headers, target_asset, qty):
+    order = {
+        "AccountKey": ACCOUNT_KEY,
+        "Uic": target_asset["Uic"],
+        "AssetType": target_asset["AssetType"],
+        "BuySell": "Buy",
+        "OrderType": "Market",
+        "Amount": qty,
+        "ManualOrder": False,
+        "OrderDuration": {"DurationType": "DayOrder"},
+    }
+    resp = requests.post(
+        f"{BASE_URL}/trade/v2/orders/precheck",
+        headers=headers,
+        json=order,
+        timeout=30,
+    )
+    payload = safe_json_loads(resp.text) or {}
+    return {
+        "action": "precheck_buy",
+        "uic": target_asset["Uic"],
+        "asset_type": target_asset["AssetType"],
+        "symbol": target_asset["symbol"],
+        "amount": qty,
+        "status_code": resp.status_code,
+        "response": resp.text,
+        "payload": payload,
+    }
+
+
+def affordable_buy_qty(headers, target_asset, desired_qty):
+    if desired_qty <= 0:
+        return 0, None, None
+
+    latest_precheck = precheck_market_buy(headers, target_asset, desired_qty)
+    if latest_precheck["status_code"] < 200 or latest_precheck["status_code"] >= 300:
+        raise RuntimeError(
+            f"Saxo precheck failed for {target_asset['symbol']} qty={desired_qty}: "
+            f"{latest_precheck['response'][:500]}"
+        )
+
+    error_info = extract_error_info(latest_precheck.get("payload"))
+    if error_info is None:
+        return desired_qty, latest_precheck, None
+    if error_info["code"] != "InsufficientCash":
+        raise RuntimeError(
+            f"Saxo precheck rejected {target_asset['symbol']} qty={desired_qty}: "
+            f"{error_info['code']} - {error_info['message']}"
+        )
+
+    best_qty = 0
+    best_precheck = None
+    low = 1
+    high = desired_qty - 1
+    insufficient_precheck = latest_precheck
+
+    while low <= high:
+        mid = (low + high) // 2
+        latest_precheck = precheck_market_buy(headers, target_asset, mid)
+        if latest_precheck["status_code"] < 200 or latest_precheck["status_code"] >= 300:
+            raise RuntimeError(
+                f"Saxo precheck failed for {target_asset['symbol']} qty={mid}: "
+                f"{latest_precheck['response'][:500]}"
+            )
+
+        error_info = extract_error_info(latest_precheck.get("payload"))
+        if error_info is None:
+            best_qty = mid
+            best_precheck = latest_precheck
+            low = mid + 1
+            continue
+        if error_info["code"] != "InsufficientCash":
+            raise RuntimeError(
+                f"Saxo precheck rejected {target_asset['symbol']} qty={mid}: "
+                f"{error_info['code']} - {error_info['message']}"
+            )
+
+        insufficient_precheck = latest_precheck
+        high = mid - 1
+
+    return best_qty, best_precheck, insufficient_precheck
 
 
 def close_position(headers, position_row):
@@ -549,7 +671,9 @@ else:
 
             current_target_row = find_target_position(pre_active_positions, target_asset)
             current_target_qty = abs(current_target_row["amount"]) if current_target_row else 0.0
-            current_target_value = current_target_qty * latest_price
+            current_target_value = abs(
+                safe_float(current_target_row.get("market_value")) if current_target_row else 0.0
+            )
             non_target_positions = [
                 row for row in pre_active_positions if not is_target_position(row, target_asset)
             ]
@@ -594,14 +718,32 @@ else:
                     raise RuntimeError("Unable to size order from refreshed Saxo equity.")
                 refreshed_target_value *= NOTIONAL_FRACTION
 
-                latest_price = get_price(headers, target_asset["Uic"], target_asset["AssetType"])
-                if latest_price is None or latest_price <= 0:
+                unit_precheck = precheck_market_buy(headers, target_asset, 1)
+                if unit_precheck["status_code"] < 200 or unit_precheck["status_code"] >= 300:
                     raise RuntimeError(
-                        f"Unable to fetch refreshed price for {target_asset['symbol']} sizing."
+                        f"Saxo precheck failed for {target_asset['symbol']} qty=1: "
+                        f"{unit_precheck['response'][:500]}"
+                    )
+                unit_precheck_error = extract_error_info(unit_precheck.get("payload"))
+                if unit_precheck_error is not None:
+                    raise RuntimeError(
+                        f"Saxo precheck rejected {target_asset['symbol']} qty=1: "
+                        f"{unit_precheck_error['code']} - {unit_precheck_error['message']}"
                     )
 
-                desired_qty = max(1, int(refreshed_target_value / latest_price))
-                refreshed_position_value = refreshed_target_qty * latest_price
+                estimated_unit_cost = safe_float(
+                    unit_precheck["payload"].get("EstimatedCashRequired")
+                )
+                if estimated_unit_cost is None or estimated_unit_cost <= 0:
+                    raise RuntimeError(
+                        f"Saxo precheck did not return a valid account-currency cost for "
+                        f"{target_asset['symbol']}."
+                    )
+
+                desired_qty = max(1, int(refreshed_target_value / estimated_unit_cost))
+                refreshed_position_value = abs(
+                    safe_float(refreshed_target_row.get("market_value")) if refreshed_target_row else 0.0
+                )
                 refreshed_gap = gap_ratio(refreshed_position_value, refreshed_target_value)
 
                 if (
@@ -624,18 +766,46 @@ else:
                         "manual review required before adding exposure."
                     )
                 else:
-                    qty = max(0, desired_qty - int(refreshed_target_qty))
+                    requested_qty = max(0, desired_qty - int(refreshed_target_qty))
+                    qty, affordable_precheck, insufficient_precheck = affordable_buy_qty(
+                        headers,
+                        target_asset,
+                        requested_qty,
+                    )
+                    if requested_qty > 0 and qty < requested_qty:
+                        insufficient_payload = (
+                            insufficient_precheck.get("payload") if insufficient_precheck else {}
+                        )
+                        orders_placed.append(
+                            {
+                                "action": "resize",
+                                "message": "Reduced buy size to fit available account currency cash",
+                                "requested_qty": requested_qty,
+                                "approved_qty": qty,
+                                "estimated_cash_required": insufficient_payload.get("EstimatedCashRequired"),
+                                "account_currency": refreshed_balance.get("account_currency"),
+                                "spending_power": refreshed_balance.get("account_spending_power"),
+                            }
+                        )
+
                     if qty > 0:
                         order_result = place_market_buy(headers, target_asset, qty)
                         orders_placed.append(order_result)
                         ensure_order_submission(order_result)
                     else:
+                        failure_payload = (
+                            insufficient_precheck.get("payload") if insufficient_precheck else {}
+                        )
                         orders_placed.append(
                             {
                                 "action": "skip",
-                                "message": "Unable to size incremental order",
+                                "message": "No affordable incremental order after Saxo precheck",
                                 "current_qty": refreshed_target_qty,
                                 "desired_qty": desired_qty,
+                                "requested_qty": requested_qty,
+                                "estimated_cash_required": failure_payload.get("EstimatedCashRequired"),
+                                "account_currency": refreshed_balance.get("account_currency"),
+                                "spending_power": refreshed_balance.get("account_spending_power"),
                             }
                         )
     except Exception as exc:
