@@ -219,7 +219,8 @@ def render_performance_chart(performance_history, regime_start_ts=None):
 
     ax1.plot(chart_df["trade_ts"], chart_df["strategy_value"], label="Saxo Strategy", linewidth=2)
     ax1.plot(chart_df["trade_ts"], chart_df["spy_benchmark"], label="SPY Benchmark", alpha=0.75)
-    regime_title = "Saxo Live Portfolio Performance vs SPY — Since Current Regime Began"
+    regime_title = "Saxo Live Portfolio Performance vs SPY - Since Current Regime Began"
+
     if regime_start_ts is not None:
         regime_title = f"{regime_title} ({pd.to_datetime(regime_start_ts)})"
     ax1.set_title(regime_title)
