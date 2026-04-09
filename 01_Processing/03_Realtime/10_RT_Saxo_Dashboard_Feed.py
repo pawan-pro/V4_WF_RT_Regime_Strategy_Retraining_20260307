@@ -66,7 +66,9 @@ def to_naive_datetime(value):
     if value is None:
         return None
 
-    if isinstance(value, datetime):
+    if isinstance(value, pd.Timestamp):
+        dt = value.to_pydatetime()
+    elif isinstance(value, datetime):
         dt = value
     else:
         try:
