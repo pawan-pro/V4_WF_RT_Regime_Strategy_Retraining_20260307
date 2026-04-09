@@ -2,10 +2,12 @@
 # RT_08: Saxo trade execution / shadow account snapshot
 
 # MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config
+# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
 
 import json
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 from pyspark.sql import functions as F
@@ -78,6 +80,8 @@ TRADE_COLUMNS = {
     "source": "STRING",
     "ingestion_ts": "TIMESTAMP",
 }
+
+NY_TZ = ZoneInfo("America/New_York")
 
 
 try:
@@ -405,6 +409,16 @@ def latest_close(symbol):
     return safe_float(rows[0]["close"]) if rows else None
 
 
+def market_is_open(now_utc=None):
+    # This guard is correct for ETF execution. If the execution universe shifts
+    # to futures or CFDs with broader trading hours, update this logic.
+    now_utc = now_utc or datetime.now(timezone.utc)
+    now_ny = now_utc.astimezone(NY_TZ)
+    market_open = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = now_ny.replace(hour=16, minute=0, second=0, microsecond=0)
+    return now_ny.weekday() < 5 and market_open <= now_ny < market_close
+
+
 ensure_trade_table()
 
 access_token = get_access_token_readonly()
@@ -454,6 +468,8 @@ last_equity = safe_float(last_mode_equity_row[0]["account_equity"]) if last_mode
 switched = False
 orders_placed = []
 transaction_cost = 0.0
+run_now_utc = datetime.now(timezone.utc)
+market_open_now = market_is_open(run_now_utc)
 
 already_in_cash = target_asset is None and not pre_active_positions
 already_in_target = (
@@ -465,6 +481,8 @@ already_in_target = (
 
 if EXECUTION_MODE == "shadow":
     orders_placed.append({"action": "shadow", "message": "No execution performed"})
+elif not market_open_now:
+    orders_placed.append({"action": "skip", "message": "Market closed"})
 else:
     last_live_trade = spark.sql(
         f"""
@@ -610,7 +628,11 @@ trade_row = {
 sdf = spark.createDataFrame([trade_row], schema=schema).withColumn(
     "ingestion_ts", F.current_timestamp()
 )
-sdf.write.format("delta").mode("append").saveAsTable(TARGET_TABLE)
+append_dataframe_with_retry(
+    sdf,
+    TARGET_TABLE,
+    operation_name=f"append Saxo trade log row into {TARGET_TABLE}",
+)
 
 print(f"Saxo trade log written to {TARGET_TABLE}")
 print(f"Execution mode: {EXECUTION_MODE}")

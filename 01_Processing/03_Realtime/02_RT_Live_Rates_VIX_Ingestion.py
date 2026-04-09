@@ -4,6 +4,8 @@
 # Writes to bronze_rt_vix_1d (RT-namespaced, isolated from BT tables)
 # Future upgrade realtime data from massive 
 
+# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
+
 %pip install fredapi
 
 from fredapi import Fred
@@ -58,12 +60,16 @@ spark.sql(f"""
 # ── MERGE (idempotent) ──
 sdf = spark.createDataFrame(rows).withColumn("ingestion_ts", F.current_timestamp())
 sdf.createOrReplaceTempView("incoming_rt_vix")
-spark.sql(f"""
+merge_sql = f"""
     MERGE INTO {TARGET_TABLE} t
     USING incoming_rt_vix s
     ON t.series = s.series AND t.timestamp = s.timestamp
     WHEN NOT MATCHED THEN INSERT *
-""")
+"""
+execute_merge_sql_with_retry(
+    merge_sql,
+    operation_name=f"merge latest VIX rows into {TARGET_TABLE}",
+)
 
 spark.sql(f"""
     SELECT series, MAX(timestamp) as last_ts, MAX(close) as last_close

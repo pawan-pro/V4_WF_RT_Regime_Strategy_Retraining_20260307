@@ -3,6 +3,7 @@
 # Produces one inference-ready row matching silver_bt_master_grid_1h schema
 
 # MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config
+# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
 
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
@@ -163,13 +164,17 @@ schema = StructType([
 
 sdf = spark.createDataFrame([rt_row], schema=schema)
 sdf.createOrReplaceTempView("incoming_silver_rt")
-spark.sql(f"""
+merge_sql = f"""
     MERGE INTO {TARGET_TABLE} t
     USING incoming_silver_rt s
     ON t.timestamp = s.timestamp
     WHEN MATCHED THEN UPDATE SET *
     WHEN NOT MATCHED THEN INSERT *
-""")
+"""
+execute_merge_sql_with_retry(
+    merge_sql,
+    operation_name=f"merge enriched realtime row into {TARGET_TABLE}",
+)
 print(f"✅ RT Silver row written: {rt_ts}")
 
 # ── AUDIT ──

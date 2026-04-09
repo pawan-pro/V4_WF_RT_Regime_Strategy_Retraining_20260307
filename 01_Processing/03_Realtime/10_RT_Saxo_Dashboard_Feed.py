@@ -2,6 +2,7 @@
 # RT_10: Saxo dashboard feed
 
 # MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config
+# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
 
 from datetime import datetime, timezone
 
@@ -280,7 +281,12 @@ dashboard_row = {
 }
 
 sdf = spark.createDataFrame([dashboard_row], schema=schema)
-sdf.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(TARGET_TABLE)
+overwrite_dataframe_with_retry(
+    sdf,
+    TARGET_TABLE,
+    options={"overwriteSchema": "true"},
+    operation_name=f"overwrite Saxo dashboard feed table {TARGET_TABLE}",
+)
 
 print(f"Saxo dashboard feed written to {TARGET_TABLE}")
 print(f"Dashboard timestamp: {dashboard_ts}")

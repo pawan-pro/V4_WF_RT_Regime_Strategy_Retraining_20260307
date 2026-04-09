@@ -2,12 +2,14 @@
 # RT_05: Paper Trade Execution
 
 # MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config
+# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
 
 # MAGIC %pip install alpaca-py
 
 import json
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce
@@ -75,6 +77,8 @@ TRADE_COLUMNS = {
     "source": "STRING",
     "ingestion_ts": "TIMESTAMP",
 }
+
+NY_TZ = ZoneInfo("America/New_York")
 
 
 def existing_columns(table_name):
@@ -178,6 +182,16 @@ def serialize_positions(position_rows):
     }
 
 
+def market_is_open(now_utc=None):
+    # This guard is correct for ETF execution. If the execution universe shifts
+    # to futures or CFDs with broader trading hours, update this logic.
+    now_utc = now_utc or datetime.now(timezone.utc)
+    now_ny = now_utc.astimezone(NY_TZ)
+    market_open = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = now_ny.replace(hour=16, minute=0, second=0, microsecond=0)
+    return now_ny.weekday() < 5 and market_open <= now_ny < market_close
+
+
 ensure_trade_table()
 
 trading_client = TradingClient(
@@ -229,8 +243,13 @@ already_in_target = (
 orders_placed = []
 switched = False
 txn_cost = 0.0
+run_now_utc = datetime.now(timezone.utc)
+market_open_now = market_is_open(run_now_utc)
 
-if already_in_cash or already_in_target:
+if not market_open_now:
+    orders_placed.append("SKIP:MARKET_CLOSED")
+    print("Market closed. Recording the latest Saxo-driven signal without paper execution.")
+elif already_in_cash or already_in_target:
     print("Portfolio already aligned with latest regime signal.")
 else:
     switched = True
@@ -360,7 +379,11 @@ trade_row = {
 sdf = spark.createDataFrame([trade_row], schema=schema).withColumn(
     "ingestion_ts", F.current_timestamp()
 )
-sdf.write.format("delta").mode("append").saveAsTable(TARGET_TABLE)
+append_dataframe_with_retry(
+    sdf,
+    TARGET_TABLE,
+    operation_name=f"append Alpaca paper trade row into {TARGET_TABLE}",
+)
 
 print(f"Trade log written to {TARGET_TABLE}")
 print(f"Signal timestamp: {signal_ts}")

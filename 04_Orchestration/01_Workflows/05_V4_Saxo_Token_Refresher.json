@@ -2,9 +2,9 @@
   "name": "v4_saxo_token_refresher",
   "description": "Standalone Saxo token refresher for V4 cutover",
   "schedule": {
-    "quartz_cron_expression": "0 0/10 * ? * MON-FRI",
+    "quartz_cron_expression": "0 0/10 * ? * *",
     "timezone_id": "America/New_York",
-    "pause_status": "PAUSED"
+    "pause_status": "UNPAUSED"
   },
   "max_concurrent_runs": 1,
   "tasks": [

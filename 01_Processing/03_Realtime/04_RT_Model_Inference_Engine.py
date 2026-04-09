@@ -2,6 +2,7 @@
 # RT_04: Model Inference Engine
 
 # MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config
+# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
 
 # MAGIC %pip install xgboost
 
@@ -216,8 +217,7 @@ update_clause = ",\n        ".join([f"t.{col} = s.{col}" for col in MERGE_COLUMN
 insert_columns = ", ".join(MERGE_COLUMNS)
 insert_values = ", ".join([f"s.{col}" for col in MERGE_COLUMNS])
 
-spark.sql(
-    f"""
+merge_sql = f"""
     MERGE INTO {TARGET_TABLE} t
     USING incoming_rt_regime_signal s
     ON t.timestamp = s.timestamp
@@ -226,6 +226,9 @@ spark.sql(
     WHEN NOT MATCHED THEN INSERT ({insert_columns})
     VALUES ({insert_values})
     """
+execute_merge_sql_with_retry(
+    merge_sql,
+    operation_name=f"merge realtime inference signal into {TARGET_TABLE}",
 )
 
 print(f"Signal written to {TARGET_TABLE}")

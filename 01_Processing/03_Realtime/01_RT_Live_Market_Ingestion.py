@@ -17,6 +17,10 @@
 
 # COMMAND ----------
 
+# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
+
+# COMMAND ----------
+
 from alpaca.data.historical import StockHistoricalDataClient
 
 try:
@@ -103,12 +107,16 @@ def write_latest_snapshot():
     
     # Upsert: don't double-write same bar
     sdf.createOrReplaceTempView("incoming")
-    spark.sql(f"""
+    merge_sql = f"""
         MERGE INTO {TARGET_TABLE} t
         USING incoming s
         ON t.symbol = s.symbol AND t.timestamp = s.timestamp
         WHEN NOT MATCHED THEN INSERT *
-    """)
+    """
+    execute_merge_sql_with_retry(
+        merge_sql,
+        operation_name=f"merge latest market bars into {TARGET_TABLE}",
+    )
     print(f"✅ Snapshot written: {rows}")
 
 write_latest_snapshot()

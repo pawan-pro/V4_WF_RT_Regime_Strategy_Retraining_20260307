@@ -1,6 +1,8 @@
 # Databricks notebook source
 # RT_09: Saxo signal audit log
 
+# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
+
 from datetime import date, datetime, timezone
 
 from pyspark.sql.types import (
@@ -246,7 +248,11 @@ audit_row = {
 }
 
 sdf = spark.createDataFrame([audit_row], schema=schema)
-sdf.write.format("delta").mode("append").saveAsTable(TARGET_TABLE)
+append_dataframe_with_retry(
+    sdf,
+    TARGET_TABLE,
+    operation_name=f"append Saxo audit row into {TARGET_TABLE}",
+)
 
 print(f"Saxo audit log written to {TARGET_TABLE}")
 print(f"Signal timestamp: {signal['timestamp']}")
