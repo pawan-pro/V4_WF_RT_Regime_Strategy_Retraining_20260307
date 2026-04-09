@@ -1,5 +1,10 @@
 # Project Operating Memory
 
+Update rule for future chats:
+- At the end of any chat session, update this file only if a durable project rule or operating constraint changed since the last update.
+- Do not update this file for temporary debugging, one-off run results, or minor implementation detail changes.
+- If nothing durable changed, leave this file unchanged.
+
 Read this before changing Databricks jobs, Saxo auth, or realtime pipelines in this repo.
 
 ## Core Ownership

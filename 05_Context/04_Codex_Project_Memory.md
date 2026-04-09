@@ -1,5 +1,10 @@
 # Codex Project Memory
 
+Update rule for future chats:
+- At the end of any chat session, update this file if any relevant operating fact changed since the last update.
+- Relevant changes include job ids, schedules, active/paused ownership, token-writer ownership, repo id/path/branch, cluster strategy, or other durable workflow decisions.
+- Do not update this file for transient logs, temporary failures, or routine successful runs unless they changed the durable operating state.
+
 This file exists so future Codex chats can recover the operating context for this repo quickly.
 
 ## Non-Negotiable Invariants
