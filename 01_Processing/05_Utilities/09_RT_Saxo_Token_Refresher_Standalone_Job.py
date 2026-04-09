@@ -10,6 +10,7 @@ import requests
 
 TOKEN_STATE_PATH = "dbfs:/Volumes/pawan_quant_research_1/default/saxo/avik_live_token_state.json"
 LOCK_PATH = TOKEN_STATE_PATH + ".lock"
+LOCK_TTL_SECONDS = 1800
 
 AUTH_BASE_URL = "https://live.logonvalidation.net"
 TOKEN_URL = f"{AUTH_BASE_URL}/token"
@@ -24,11 +25,14 @@ def load_token():
 
 
 def acquire_lock():
-    try:
-        dbutils.fs.put(LOCK_PATH, str(time.time()), overwrite=False)
-        return True
-    except Exception:
-        return False
+    for attempt in range(2):
+        try:
+            dbutils.fs.put(LOCK_PATH, str(time.time()), overwrite=False)
+            return True
+        except Exception:
+            if attempt == 0 and clear_stale_lock():
+                continue
+            return False
 
 
 def release_lock():
@@ -36,6 +40,30 @@ def release_lock():
         dbutils.fs.rm(LOCK_PATH)
     except Exception:
         pass
+
+
+def read_lock_timestamp():
+    try:
+        return float(dbutils.fs.head(LOCK_PATH, 256).strip())
+    except Exception:
+        return None
+
+
+def clear_stale_lock():
+    lock_ts = read_lock_timestamp()
+    if lock_ts is None:
+        return False
+
+    age_seconds = time.time() - lock_ts
+    if age_seconds <= LOCK_TTL_SECONDS:
+        return False
+
+    print(f"Removing stale Saxo token lock after {int(age_seconds)} seconds")
+    try:
+        dbutils.fs.rm(LOCK_PATH)
+        return True
+    except Exception:
+        return False
 
 
 def refresh():

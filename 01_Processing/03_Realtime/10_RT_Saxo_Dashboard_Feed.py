@@ -34,6 +34,15 @@ PRIMARY_SYMBOL = runtime_config["primary_symbol"]
 SECONDARY_SYMBOL = runtime_config["secondary_symbol"]
 PRICE_SYMBOLS_SQL = ", ".join([f"'{symbol}'" for symbol in {PRIMARY_SYMBOL, SECONDARY_SYMBOL} if symbol])
 
+try:
+    dbutils.widgets.dropdown("execution_mode", "auto", ["auto", "shadow", "live"])
+    EXECUTION_MODE = (dbutils.widgets.get("execution_mode") or "auto").strip().lower()
+except Exception:
+    EXECUTION_MODE = "auto"
+
+if EXECUTION_MODE not in {"auto", "shadow", "live"}:
+    raise ValueError(f"Unsupported execution_mode: {EXECUTION_MODE}")
+
 
 def maybe_float(value):
     if value is None:
@@ -68,6 +77,23 @@ def get_model_version(default_version):
     return default_version
 
 
+def resolve_execution_mode():
+    if EXECUTION_MODE != "auto":
+        return EXECUTION_MODE
+
+    rows = spark.sql(
+        f"""
+        SELECT execution_mode
+        FROM {TRADE_LOG}
+        ORDER BY trade_ts DESC
+        LIMIT 1
+        """
+    ).collect()
+    if rows and rows[0]["execution_mode"] in {"shadow", "live"}:
+        return rows[0]["execution_mode"]
+    return "shadow"
+
+
 def load_performance_history():
     history = spark.sql(
         f"""
@@ -81,6 +107,7 @@ def load_performance_history():
         FROM {TRADE_LOG}
         WHERE account_equity IS NOT NULL
           AND spy_close IS NOT NULL
+          AND execution_mode = '{EXECUTION_MODE}'
         ORDER BY trade_ts
         """
     ).toPandas()
@@ -148,6 +175,7 @@ signal = spark.sql(
     """
 ).collect()[0]
 signal_data = signal.asDict(recursive=True)
+EXECUTION_MODE = resolve_execution_mode()
 
 silver = spark.sql(
     f"""
@@ -162,6 +190,7 @@ trade = spark.sql(
     f"""
     SELECT *
     FROM {TRADE_LOG}
+    WHERE execution_mode = '{EXECUTION_MODE}'
     ORDER BY trade_ts DESC
     LIMIT 1
     """
@@ -191,6 +220,7 @@ portfolio_stats = spark.sql(
         SUM(CASE WHEN switched THEN 1 ELSE 0 END) AS total_switches,
         MAX(account_equity) AS peak_equity
     FROM {TRADE_LOG}
+    WHERE execution_mode = '{EXECUTION_MODE}'
     """
 ).collect()[0]
 
@@ -199,6 +229,7 @@ starting_equity_row = spark.sql(
     SELECT account_equity
     FROM {TRADE_LOG}
     WHERE account_equity IS NOT NULL
+      AND execution_mode = '{EXECUTION_MODE}'
     ORDER BY trade_ts ASC
     LIMIT 1
     """
@@ -222,6 +253,7 @@ regime_dist = spark.sql(
         ROUND(100.0 * SUM(CASE WHEN regime_int = 1 THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_slowdown,
         ROUND(100.0 * SUM(CASE WHEN regime_int = 2 THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_recession
     FROM {AUDIT_LOG}
+    WHERE execution_mode = '{EXECUTION_MODE}'
     """
 ).collect()[0]
 

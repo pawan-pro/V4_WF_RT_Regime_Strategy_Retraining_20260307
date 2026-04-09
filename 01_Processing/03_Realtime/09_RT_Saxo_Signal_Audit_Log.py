@@ -26,6 +26,16 @@ TARGET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_saxo_signal_audit_log"
 MODEL_REGISTRY_TABLE = f"{CATALOG}.{SCHEMA}.model_registry_current"
 
 
+try:
+    dbutils.widgets.dropdown("execution_mode", "auto", ["auto", "shadow", "live"])
+    EXECUTION_MODE = (dbutils.widgets.get("execution_mode") or "auto").strip().lower()
+except Exception:
+    EXECUTION_MODE = "auto"
+
+if EXECUTION_MODE not in {"auto", "shadow", "live"}:
+    raise ValueError(f"Unsupported execution_mode: {EXECUTION_MODE}")
+
+
 def existing_columns(table_name):
     if not spark.catalog.tableExists(table_name):
         return set()
@@ -116,7 +126,25 @@ def get_model_version():
     return "bootstrap_live_model"
 
 
+def resolve_execution_mode():
+    if EXECUTION_MODE != "auto":
+        return EXECUTION_MODE
+
+    rows = spark.sql(
+        f"""
+        SELECT execution_mode
+        FROM {TRADE_LOG}
+        ORDER BY trade_ts DESC
+        LIMIT 1
+        """
+    ).collect()
+    if rows and rows[0]["execution_mode"] in {"shadow", "live"}:
+        return rows[0]["execution_mode"]
+    return "shadow"
+
+
 ensure_audit_table()
+EXECUTION_MODE = resolve_execution_mode()
 
 signal = spark.sql(
     f"""
@@ -141,6 +169,7 @@ trade = spark.sql(
     f"""
     SELECT *
     FROM {TRADE_LOG}
+    WHERE execution_mode = '{EXECUTION_MODE}'
     ORDER BY trade_ts DESC
     LIMIT 1
     """

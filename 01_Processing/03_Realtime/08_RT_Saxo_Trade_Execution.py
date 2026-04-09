@@ -39,6 +39,7 @@ MARKET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_market_1h"
 TARGET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_saxo_trade_log"
 
 NOTIONAL_FRACTION = 0.95
+ALIGNMENT_TOLERANCE_PCT = 0.02
 
 runtime_config = load_runtime_instrument_config(spark, CATALOG, SCHEMA)
 PRIMARY_SYMBOL = runtime_config["primary_symbol"]
@@ -108,6 +109,15 @@ def first_present(*values):
         if value is not None:
             return value
     return None
+
+
+def safe_json_loads(payload):
+    if not payload:
+        return None
+    try:
+        return json.loads(payload)
+    except Exception:
+        return None
 
 
 def existing_columns(table_name):
@@ -339,6 +349,43 @@ def extract_balance_metrics(balance_payload):
     }
 
 
+def is_target_position(position_row, target_asset):
+    return (
+        target_asset is not None
+        and position_row["uic"] == target_asset["Uic"]
+        and position_row["asset_type"] == target_asset["AssetType"]
+    )
+
+
+def find_target_position(position_rows, target_asset):
+    for row in position_rows:
+        if is_target_position(row, target_asset):
+            return row
+    return None
+
+
+def gap_ratio(current_value, target_value):
+    if current_value is None or target_value in (None, 0.0):
+        return None
+    return abs(current_value - target_value) / target_value
+
+
+def ensure_order_submission(order_result):
+    status_code = order_result.get("status_code")
+    if status_code is not None and 200 <= int(status_code) < 300:
+        return
+
+    response_text = order_result.get("response") or ""
+    response_payload = safe_json_loads(response_text)
+    if isinstance(response_payload, dict):
+        response_text = json.dumps(response_payload)
+
+    raise RuntimeError(
+        f"Saxo {order_result.get('action')} order failed with status "
+        f"{status_code}: {response_text[:500]}"
+    )
+
+
 def close_position(headers, position_row):
     side = "Sell" if position_row["amount"] > 0 else "Buy"
     order = {
@@ -468,70 +515,132 @@ last_equity = safe_float(last_mode_equity_row[0]["account_equity"]) if last_mode
 switched = False
 orders_placed = []
 transaction_cost = 0.0
+execution_error = None
 run_now_utc = datetime.now(timezone.utc)
 market_open_now = market_is_open(run_now_utc)
-
-already_in_cash = target_asset is None and not pre_active_positions
-already_in_target = (
-    target_asset is not None
-    and len(pre_active_positions) == 1
-    and pre_active_positions[0]["uic"] == target_asset["Uic"]
-    and pre_active_positions[0]["asset_type"] == target_asset["AssetType"]
-)
 
 if EXECUTION_MODE == "shadow":
     orders_placed.append({"action": "shadow", "message": "No execution performed"})
 elif not market_open_now:
     orders_placed.append({"action": "skip", "message": "Market closed"})
 else:
-    last_live_trade = spark.sql(
-        f"""
-        SELECT target_position, trade_ts
-        FROM {TARGET_TABLE}
-        WHERE execution_mode = 'live'
-        ORDER BY trade_ts DESC
-        LIMIT 1
-        """
-    ).collect()
-
-    if last_live_trade:
-        last_position = last_live_trade[0]["target_position"]
-        last_trade_ts = last_live_trade[0]["trade_ts"].replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
-        hours_since = (now - last_trade_ts).total_seconds() / 3600
-        if last_position == target_position and hours_since < 1:
-            orders_placed.append({"action": "skip", "message": "Duplicate signal within 1 hour"})
-        elif already_in_cash or already_in_target:
-            orders_placed.append({"action": "skip", "message": "Portfolio already aligned"})
-        else:
-            switched = True
-    elif already_in_cash or already_in_target:
-        orders_placed.append({"action": "skip", "message": "Portfolio already aligned"})
-    else:
-        switched = True
-
-    if switched:
+    try:
         if target_asset is None:
-            for row in pre_active_positions:
-                orders_placed.append(close_position(headers, row))
-                time.sleep(1)
+            if not pre_active_positions:
+                orders_placed.append({"action": "skip", "message": "Portfolio already aligned"})
+            else:
+                switched = True
+                for row in pre_active_positions:
+                    order_result = close_position(headers, row)
+                    orders_placed.append(order_result)
+                    ensure_order_submission(order_result)
+                    time.sleep(1)
         else:
-            for row in pre_active_positions:
-                if row["uic"] != target_asset["Uic"] or row["asset_type"] != target_asset["AssetType"]:
-                    orders_placed.append(close_position(headers, row))
+            latest_price = get_price(headers, target_asset["Uic"], target_asset["AssetType"])
+            if latest_price is None or latest_price <= 0:
+                raise RuntimeError(
+                    f"Unable to fetch live price for {target_asset['symbol']} sizing."
+                )
+
+            target_value = safe_float(pre_balance["account_equity"])
+            if target_value is None or target_value <= 0:
+                raise RuntimeError("Unable to size order from current Saxo equity.")
+            target_value *= NOTIONAL_FRACTION
+
+            current_target_row = find_target_position(pre_active_positions, target_asset)
+            current_target_qty = abs(current_target_row["amount"]) if current_target_row else 0.0
+            current_target_value = current_target_qty * latest_price
+            non_target_positions = [
+                row for row in pre_active_positions if not is_target_position(row, target_asset)
+            ]
+            already_in_target = (
+                not non_target_positions
+                and current_target_qty > 0
+                and gap_ratio(current_target_value, target_value) is not None
+                and gap_ratio(current_target_value, target_value) <= ALIGNMENT_TOLERANCE_PCT
+            )
+
+            if already_in_target:
+                orders_placed.append(
+                    {
+                        "action": "skip",
+                        "message": "Portfolio already aligned",
+                        "current_qty": current_target_qty,
+                        "current_value": current_target_value,
+                        "target_value": target_value,
+                    }
+                )
+            else:
+                switched = True
+                for row in non_target_positions:
+                    order_result = close_position(headers, row)
+                    orders_placed.append(order_result)
+                    ensure_order_submission(order_result)
                     time.sleep(1)
 
-            refreshed_balance_payload = fetch_balance(headers)
-            refreshed_balance = extract_balance_metrics(refreshed_balance_payload)
-            target_value = safe_float(refreshed_balance["account_equity"]) or safe_float(pre_balance["account_equity"])
-            target_value = target_value * NOTIONAL_FRACTION if target_value is not None else None
-            latest_price = get_price(headers, target_asset["Uic"], target_asset["AssetType"])
-            qty = max(1, int(target_value / latest_price)) if target_value and latest_price else 0
+                refreshed_positions_payload = fetch_positions(headers)
+                refreshed_active_positions = active_positions(refreshed_positions_payload)
+                refreshed_target_row = find_target_position(refreshed_active_positions, target_asset)
+                refreshed_target_qty = (
+                    abs(refreshed_target_row["amount"]) if refreshed_target_row else 0.0
+                )
 
-            if qty > 0:
-                orders_placed.append(place_market_buy(headers, target_asset, qty))
-            else:
-                orders_placed.append({"action": "skip", "message": "Unable to size order"})
+                refreshed_balance_payload = fetch_balance(headers)
+                refreshed_balance = extract_balance_metrics(refreshed_balance_payload)
+                refreshed_target_value = safe_float(refreshed_balance["account_equity"]) or safe_float(
+                    pre_balance["account_equity"]
+                )
+                if refreshed_target_value is None or refreshed_target_value <= 0:
+                    raise RuntimeError("Unable to size order from refreshed Saxo equity.")
+                refreshed_target_value *= NOTIONAL_FRACTION
+
+                latest_price = get_price(headers, target_asset["Uic"], target_asset["AssetType"])
+                if latest_price is None or latest_price <= 0:
+                    raise RuntimeError(
+                        f"Unable to fetch refreshed price for {target_asset['symbol']} sizing."
+                    )
+
+                desired_qty = max(1, int(refreshed_target_value / latest_price))
+                refreshed_position_value = refreshed_target_qty * latest_price
+                refreshed_gap = gap_ratio(refreshed_position_value, refreshed_target_value)
+
+                if (
+                    refreshed_target_qty > 0
+                    and refreshed_gap is not None
+                    and refreshed_gap <= ALIGNMENT_TOLERANCE_PCT
+                ):
+                    orders_placed.append(
+                        {
+                            "action": "skip",
+                            "message": "Portfolio already aligned after refresh",
+                            "current_qty": refreshed_target_qty,
+                            "current_value": refreshed_position_value,
+                            "target_value": refreshed_target_value,
+                        }
+                    )
+                elif refreshed_target_qty > desired_qty:
+                    raise RuntimeError(
+                        "Current target position exceeds desired size after refresh; "
+                        "manual review required before adding exposure."
+                    )
+                else:
+                    qty = max(0, desired_qty - int(refreshed_target_qty))
+                    if qty > 0:
+                        order_result = place_market_buy(headers, target_asset, qty)
+                        orders_placed.append(order_result)
+                        ensure_order_submission(order_result)
+                    else:
+                        orders_placed.append(
+                            {
+                                "action": "skip",
+                                "message": "Unable to size incremental order",
+                                "current_qty": refreshed_target_qty,
+                                "desired_qty": desired_qty,
+                            }
+                        )
+    except Exception as exc:
+        execution_error = str(exc)
+        orders_placed.append({"action": "error", "message": execution_error})
 
 time.sleep(2)
 
@@ -643,3 +752,6 @@ print(f"Account balance: {account_balance}")
 print(f"Account equity: {account_equity}")
 print(f"Hourly PnL: {hourly_pnl}")
 print(f"Open positions: {position_snapshot['positions_count']}")
+
+if execution_error:
+    raise RuntimeError(execution_error)

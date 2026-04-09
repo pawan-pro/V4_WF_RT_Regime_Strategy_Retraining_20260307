@@ -68,4 +68,3 @@ dbutils.fs.put(temp_path, json.dumps(state), overwrite=True)
 dbutils.fs.mv(temp_path, TOKEN_STATE_PATH, True)
 
 print("Token saved successfully.")
-print(dbutils.fs.head(TOKEN_STATE_PATH))

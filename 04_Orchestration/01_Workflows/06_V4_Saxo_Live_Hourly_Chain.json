@@ -83,7 +83,10 @@
       "min_retry_interval_millis": 120000,
       "retry_on_timeout": true,
       "notebook_task": {
-        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/09_RT_Saxo_Signal_Audit_Log"
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/09_RT_Saxo_Signal_Audit_Log",
+        "base_parameters": {
+          "execution_mode": "live"
+        }
       }
     },
     {
@@ -94,7 +97,10 @@
       "min_retry_interval_millis": 120000,
       "retry_on_timeout": true,
       "notebook_task": {
-        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/10_RT_Saxo_Dashboard_Feed"
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/10_RT_Saxo_Dashboard_Feed",
+        "base_parameters": {
+          "execution_mode": "live"
+        }
       }
     }
   ]
