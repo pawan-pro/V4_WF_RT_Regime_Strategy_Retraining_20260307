@@ -62,6 +62,23 @@ def maybe_int(value):
         return None
 
 
+def to_naive_datetime(value):
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = pd.to_datetime(value).to_pydatetime()
+        except Exception:
+            return None
+
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 def get_model_version(default_version):
     if spark.catalog.tableExists(MODEL_REGISTRY_TABLE):
         rows = spark.sql(
@@ -96,7 +113,7 @@ def resolve_execution_mode():
 
 def get_current_regime_start_ts(execution_mode, current_regime_int, current_signal_ts):
     if current_regime_int is None:
-        return pd.to_datetime(current_signal_ts) if current_signal_ts is not None else None
+        return to_naive_datetime(current_signal_ts)
 
     def first_contiguous_regime_start(rows, regime_col):
         if rows.empty:
@@ -133,7 +150,7 @@ def get_current_regime_start_ts(execution_mode, current_regime_int, current_sign
             audit_rows["event_ts"] = pd.to_datetime(audit_rows["event_ts"])
             start_ts = first_contiguous_regime_start(audit_rows, "regime_int")
             if start_ts is not None:
-                return start_ts
+                return to_naive_datetime(start_ts)
 
     if spark.catalog.tableExists(TRADE_LOG):
         trade_rows = (
@@ -155,9 +172,9 @@ def get_current_regime_start_ts(execution_mode, current_regime_int, current_sign
             trade_rows["event_ts"] = pd.to_datetime(trade_rows["event_ts"])
             start_ts = first_contiguous_regime_start(trade_rows, "regime_int")
             if start_ts is not None:
-                return start_ts
+                return to_naive_datetime(start_ts)
 
-    return pd.to_datetime(current_signal_ts) if current_signal_ts is not None else None
+    return to_naive_datetime(current_signal_ts)
 
 
 def load_performance_history(current_regime_start_ts):
