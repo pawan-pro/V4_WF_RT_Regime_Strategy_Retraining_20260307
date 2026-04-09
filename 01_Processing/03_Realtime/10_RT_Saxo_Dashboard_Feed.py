@@ -94,7 +94,73 @@ def resolve_execution_mode():
     return "shadow"
 
 
-def load_performance_history():
+def get_current_regime_start_ts(execution_mode, current_regime_int, current_signal_ts):
+    if current_regime_int is None:
+        return pd.to_datetime(current_signal_ts) if current_signal_ts is not None else None
+
+    def first_contiguous_regime_start(rows, regime_col):
+        if rows.empty:
+            return None
+        if regime_col not in rows.columns:
+            return None
+
+        contiguous_start_ts = None
+        for _, row in rows.iterrows():
+            if pd.isna(row[regime_col]):
+                continue
+            if int(row[regime_col]) != int(current_regime_int):
+                break
+            contiguous_start_ts = row["event_ts"]
+        return contiguous_start_ts
+
+    if spark.catalog.tableExists(AUDIT_LOG):
+        audit_rows = (
+            spark.sql(
+                f"""
+                SELECT
+                    audit_ts AS event_ts,
+                    regime_int
+                FROM {AUDIT_LOG}
+                WHERE execution_mode = '{execution_mode}'
+                  AND audit_ts IS NOT NULL
+                  AND regime_int IS NOT NULL
+                ORDER BY audit_ts DESC
+                """
+            )
+            .toPandas()
+        )
+        if not audit_rows.empty:
+            audit_rows["event_ts"] = pd.to_datetime(audit_rows["event_ts"])
+            start_ts = first_contiguous_regime_start(audit_rows, "regime_int")
+            if start_ts is not None:
+                return start_ts
+
+    if spark.catalog.tableExists(TRADE_LOG):
+        trade_rows = (
+            spark.sql(
+                f"""
+                SELECT
+                    trade_ts AS event_ts,
+                    regime_int
+                FROM {TRADE_LOG}
+                WHERE execution_mode = '{execution_mode}'
+                  AND trade_ts IS NOT NULL
+                  AND regime_int IS NOT NULL
+                ORDER BY trade_ts DESC
+                """
+            )
+            .toPandas()
+        )
+        if not trade_rows.empty:
+            trade_rows["event_ts"] = pd.to_datetime(trade_rows["event_ts"])
+            start_ts = first_contiguous_regime_start(trade_rows, "regime_int")
+            if start_ts is not None:
+                return start_ts
+
+    return pd.to_datetime(current_signal_ts) if current_signal_ts is not None else None
+
+
+def load_performance_history(current_regime_start_ts):
     history = spark.sql(
         f"""
         SELECT
@@ -119,6 +185,10 @@ def load_performance_history():
     history["signal_ts"] = pd.to_datetime(history["signal_ts"])
     history["account_equity"] = history["account_equity"].astype(float)
     history["spy_close"] = history["spy_close"].astype(float)
+    if current_regime_start_ts is not None:
+        history = history[history["trade_ts"] >= pd.to_datetime(current_regime_start_ts)].copy()
+        if history.empty:
+            return history
 
     initial_equity = float(history["account_equity"].iloc[0])
     initial_spy_close = float(history["spy_close"].iloc[0])
@@ -132,7 +202,7 @@ def load_performance_history():
     return history
 
 
-def render_performance_chart(performance_history):
+def render_performance_chart(performance_history, regime_start_ts=None):
     if performance_history.empty or performance_history.shape[0] < 2:
         print("Not enough Saxo history to render performance chart.")
         return
@@ -149,7 +219,10 @@ def render_performance_chart(performance_history):
 
     ax1.plot(chart_df["trade_ts"], chart_df["strategy_value"], label="Saxo Strategy", linewidth=2)
     ax1.plot(chart_df["trade_ts"], chart_df["spy_benchmark"], label="SPY Benchmark", alpha=0.75)
-    ax1.set_title("Saxo Live Portfolio Performance vs SPY")
+    regime_title = "Saxo Live Portfolio Performance vs SPY — Since Current Regime Began"
+    if regime_start_ts is not None:
+        regime_title = f"{regime_title} ({pd.to_datetime(regime_start_ts)})"
+    ax1.set_title(regime_title)
     ax1.set_ylabel("Portfolio Value")
     ax1.legend()
     ax1.grid(True, alpha=0.3)
@@ -246,6 +319,46 @@ drawdown_pct = None
 if peak_equity not in (None, 0.0) and latest_equity is not None:
     drawdown_pct = latest_equity / peak_equity - 1.0
 
+current_regime_start_ts = get_current_regime_start_ts(
+    EXECUTION_MODE,
+    signal["regime_int"],
+    signal["timestamp"],
+)
+
+regime_start_equity = None
+regime_return_pct = None
+regime_drawdown_pct = None
+if current_regime_start_ts is not None and signal["regime_int"] is not None:
+    regime_start_row = spark.sql(
+        f"""
+        SELECT account_equity
+        FROM {TRADE_LOG}
+        WHERE execution_mode = '{EXECUTION_MODE}'
+          AND trade_ts >= '{current_regime_start_ts}'
+          AND regime_int = {int(signal["regime_int"])}
+          AND account_equity IS NOT NULL
+        ORDER BY trade_ts ASC
+        LIMIT 1
+        """
+    ).collect()
+    if regime_start_row:
+        regime_start_equity = maybe_float(regime_start_row[0]["account_equity"])
+        if regime_start_equity not in (None, 0.0) and latest_equity is not None:
+            regime_return_pct = latest_equity / regime_start_equity - 1.0
+
+    regime_peak_row = spark.sql(
+        f"""
+        SELECT MAX(account_equity) AS regime_peak_equity
+        FROM {TRADE_LOG}
+        WHERE execution_mode = '{EXECUTION_MODE}'
+          AND trade_ts >= '{current_regime_start_ts}'
+          AND account_equity IS NOT NULL
+        """
+    ).collect()[0]
+    regime_peak_equity = maybe_float(regime_peak_row["regime_peak_equity"]) if regime_peak_row else None
+    if regime_peak_equity not in (None, 0.0) and latest_equity is not None:
+        regime_drawdown_pct = latest_equity / regime_peak_equity - 1.0
+
 regime_dist = spark.sql(
     f"""
     SELECT
@@ -274,7 +387,7 @@ vix_source_date = spark.sql(
 
 dashboard_ts = datetime.now(timezone.utc).replace(tzinfo=None)
 model_version = get_model_version(signal_data.get("model_version") or "bootstrap_live_model")
-performance_history = load_performance_history()
+performance_history = load_performance_history(current_regime_start_ts)
 latest_alpha_pct = (
     float(performance_history["alpha_pct"].iloc[-1])
     if not performance_history.empty
@@ -287,6 +400,7 @@ schema = StructType(
         StructField("dashboard_ts", TimestampType(), True),
         StructField("signal_ts", TimestampType(), True),
         StructField("trade_ts", TimestampType(), True),
+        StructField("current_regime_start_ts", TimestampType(), True),
         StructField("price_ts", TimestampType(), True),
         StructField("macro_last_release_ts", TimestampType(), True),
         StructField("regime_int", IntegerType(), True),
@@ -322,8 +436,10 @@ schema = StructType(
         StructField("day_pnl", DoubleType(), True),
         StructField("day_pnl_pct", DoubleType(), True),
         StructField("total_return_pct", DoubleType(), True),
+        StructField("regime_return_pct", DoubleType(), True),
         StructField("alpha_pct", DoubleType(), True),
         StructField("drawdown_pct", DoubleType(), True),
+        StructField("regime_drawdown_pct", DoubleType(), True),
         StructField("total_cycles", IntegerType(), True),
         StructField("total_switches", IntegerType(), True),
         StructField("peak_equity", DoubleType(), True),
@@ -343,6 +459,7 @@ dashboard_row = {
     "dashboard_ts": dashboard_ts,
     "signal_ts": signal["timestamp"],
     "trade_ts": trade["trade_ts"],
+    "current_regime_start_ts": current_regime_start_ts,
     "price_ts": price_ts,
     "macro_last_release_ts": macro_last_release_ts,
     "regime_int": signal["regime_int"],
@@ -378,8 +495,10 @@ dashboard_row = {
     "day_pnl": maybe_float(trade["day_pnl"]),
     "day_pnl_pct": maybe_float(trade["day_pnl_pct"]),
     "total_return_pct": total_return_pct,
+    "regime_return_pct": regime_return_pct,
     "alpha_pct": latest_alpha_pct,
     "drawdown_pct": drawdown_pct,
+    "regime_drawdown_pct": regime_drawdown_pct,
     "total_cycles": maybe_int(portfolio_stats["total_cycles"]),
     "total_switches": maybe_int(portfolio_stats["total_switches"]),
     "peak_equity": peak_equity,
@@ -401,15 +520,23 @@ overwrite_dataframe_with_retry(
     operation_name=f"overwrite Saxo dashboard feed table {TARGET_TABLE}",
 )
 
-render_performance_chart(performance_history)
+render_performance_chart(performance_history, current_regime_start_ts)
 
 print(f"Saxo dashboard feed written to {TARGET_TABLE}")
 print(f"Dashboard timestamp: {dashboard_ts}")
 print(f"Execution mode: {trade['execution_mode']}")
 print(f"Regime: {dashboard_row['regime_name']} ({dashboard_row['regime_int']})")
+if current_regime_start_ts is not None:
+    print(f"Current regime start: {current_regime_start_ts}")
 print(f"Target allocation: {dashboard_row['position']}")
 print(f"Account balance: {dashboard_row['account_balance']}")
 print(f"Account equity: {dashboard_row['account_equity']}")
+if regime_start_equity is not None:
+    print(f"Regime start equity: {regime_start_equity}")
+if regime_return_pct is not None:
+    print(f"Regime return pct: {regime_return_pct:+.2%}")
+if regime_drawdown_pct is not None:
+    print(f"Regime drawdown pct: {regime_drawdown_pct:+.2%}")
 print(f"Hourly PnL: {dashboard_row['hourly_pnl']}")
 print(
     "Alpha pct: "
