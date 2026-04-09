@@ -6,29 +6,11 @@
     "timezone_id": "America/New_York",
     "pause_status": "UNPAUSED"
   },
-  "job_clusters": [
-    {
-      "job_cluster_key": "v4_job_cluster",
-      "new_cluster": {
-        "spark_version": "15.4.x-scala2.12",
-        "node_type_id": "i3.xlarge",
-        "num_workers": 1,
-        "data_security_mode": "SINGLE_USER",
-        "runtime_engine": "STANDARD",
-        "aws_attributes": {
-          "availability": "ON_DEMAND",
-          "ebs_volume_type": "GENERAL_PURPOSE_SSD",
-          "ebs_volume_count": 1,
-          "ebs_volume_size": 100
-        }
-      }
-    }
-  ],
   "max_concurrent_runs": 1,
   "tasks": [
     {
       "task_key": "rt_05_trade",
-      "job_cluster_key": "v4_job_cluster",
+      "existing_cluster_id": "0311-005159-pm2x3pce",
       "max_retries": 2,
       "min_retry_interval_millis": 120000,
       "retry_on_timeout": true,
@@ -42,7 +24,7 @@
     {
       "task_key": "rt_06_audit",
       "depends_on": [{"task_key": "rt_05_trade"}],
-      "job_cluster_key": "v4_job_cluster",
+      "existing_cluster_id": "0311-005159-pm2x3pce",
       "max_retries": 2,
       "min_retry_interval_millis": 120000,
       "retry_on_timeout": true,
@@ -53,7 +35,7 @@
     {
       "task_key": "rt_07_dashboard",
       "depends_on": [{"task_key": "rt_06_audit"}],
-      "job_cluster_key": "v4_job_cluster",
+      "existing_cluster_id": "0311-005159-pm2x3pce",
       "max_retries": 2,
       "min_retry_interval_millis": 120000,
       "retry_on_timeout": true,
@@ -64,7 +46,7 @@
     {
       "task_key": "rt_08_live_portfolio",
       "depends_on": [{"task_key": "rt_07_dashboard"}],
-      "job_cluster_key": "v4_job_cluster",
+      "existing_cluster_id": "0311-005159-pm2x3pce",
       "max_retries": 2,
       "min_retry_interval_millis": 120000,
       "retry_on_timeout": true,

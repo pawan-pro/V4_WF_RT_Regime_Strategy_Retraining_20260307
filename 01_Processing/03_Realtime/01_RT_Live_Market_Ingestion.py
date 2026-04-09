@@ -17,10 +17,6 @@
 
 # COMMAND ----------
 
-# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
-
-# COMMAND ----------
-
 from alpaca.data.historical import StockHistoricalDataClient
 
 try:
@@ -43,6 +39,10 @@ print(
 
 # MAGIC %pip install nest_asyncio
 # MAGIC
+
+# COMMAND ----------
+
+# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
 
 # COMMAND ----------
 

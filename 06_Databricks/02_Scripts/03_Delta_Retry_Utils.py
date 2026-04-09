@@ -4,6 +4,8 @@
 import random
 import time
 
+from pyspark.sql import SparkSession
+
 RETRYABLE_DELTA_MARKERS = (
     "ConcurrentAppendException",
     "[DELTA_CONCURRENT_APPEND]",
@@ -51,9 +53,12 @@ def run_with_retry(
 
 
 def execute_merge_sql_with_retry(merge_sql, operation_name, **retry_kwargs):
+    spark_session = SparkSession.getActiveSession()
+    if spark_session is None:
+        raise RuntimeError("No active Spark session available for Delta merge retry helper.")
     return run_with_retry(
         operation_name=operation_name,
-        operation=lambda: spark.sql(merge_sql),
+        operation=lambda: spark_session.sql(merge_sql),
         **retry_kwargs,
     )
 

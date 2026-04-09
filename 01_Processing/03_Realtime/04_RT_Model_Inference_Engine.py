@@ -2,9 +2,9 @@
 # RT_04: Model Inference Engine
 
 # MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config
-# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
-
 # MAGIC %pip install xgboost
+
+# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
 
 import joblib
 from pyspark.sql import functions as F

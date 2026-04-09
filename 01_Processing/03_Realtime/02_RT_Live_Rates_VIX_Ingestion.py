@@ -4,9 +4,9 @@
 # Writes to bronze_rt_vix_1d (RT-namespaced, isolated from BT tables)
 # Future upgrade realtime data from massive 
 
-# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
-
 %pip install fredapi
+
+# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
 
 from fredapi import Fred
 import pandas as pd
