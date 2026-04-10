@@ -128,6 +128,7 @@ def build_rows_from_calendar(payload):
     if events.empty:
         return []
 
+    now_utc = datetime.now(ZoneInfo("UTC")).replace(tzinfo=None)
     rows = []
     for _, row in events.iterrows():
         event_name = str(row.get("event") or "")
@@ -143,8 +144,10 @@ def build_rows_from_calendar(payload):
         actual_value = float(raw_value) if pd.notna(raw_value) else None
         status = "scheduled"
 
-        if actual_value is not None:
+        if actual_value is not None and scheduled_release <= now_utc:
             status = "observed"
+        else:
+            actual_value = None
         confidence = estimate_confidence(event_name, status)
         release_stage = infer_release_stage(event_name)
         validation_status = infer_validation_status(indicator_id, release_stage, status)
