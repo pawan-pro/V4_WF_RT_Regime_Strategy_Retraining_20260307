@@ -803,7 +803,7 @@ else:
                         f"{unit_precheck['response'][:500]}"
                     )
                 unit_precheck_error = extract_error_info(unit_precheck.get("payload"))
-                if unit_precheck_error is not None:
+                if unit_precheck_error is not None and unit_precheck_error["code"] != "InsufficientCash":
                     raise RuntimeError(
                         f"Saxo precheck rejected {target_asset['symbol']} qty=1: "
                         f"{unit_precheck_error['code']} - {unit_precheck_error['message']}"
@@ -812,82 +812,98 @@ else:
                 estimated_unit_cost = safe_float(
                     unit_precheck["payload"].get("EstimatedCashRequired")
                 )
-                if estimated_unit_cost is None or estimated_unit_cost <= 0:
-                    raise RuntimeError(
-                        f"Saxo precheck did not return a valid account-currency cost for "
-                        f"{target_asset['symbol']}."
-                    )
-
-                desired_qty = max(1, int(refreshed_target_value / estimated_unit_cost))
-                refreshed_position_value = abs(
-                    safe_float(refreshed_target_row.get("market_value")) if refreshed_target_row else 0.0
-                )
-                refreshed_gap = gap_ratio(refreshed_position_value, refreshed_target_value)
-
-                if (
-                    refreshed_target_qty > 0
-                    and refreshed_gap is not None
-                    and refreshed_gap <= ALIGNMENT_TOLERANCE_PCT
-                ):
+                insufficient_precheck = None
+                if unit_precheck_error is not None and unit_precheck_error["code"] == "InsufficientCash":
+                    insufficient_precheck = unit_precheck
                     orders_placed.append(
                         {
                             "action": "skip",
-                            "message": "Portfolio already aligned after refresh",
-                            "current_qty": refreshed_target_qty,
-                            "current_value": refreshed_position_value,
-                            "target_value": refreshed_target_value,
+                            "message": "InsufficientCash for minimum buy size; skipping buy adjustment.",
+                            "requested_qty": 0,
+                            "estimated_cash_required": unit_precheck["payload"].get(
+                                "EstimatedCashRequired"
+                            ),
+                            "account_currency": refreshed_balance.get("account_currency"),
+                            "spending_power": refreshed_balance.get("account_spending_power"),
                         }
                     )
-                elif refreshed_target_qty > desired_qty:
-                    raise RuntimeError(
-                        "Current target position exceeds desired size after refresh; "
-                        "manual review required before adding exposure."
-                    )
                 else:
-                    requested_qty = max(0, desired_qty - int(refreshed_target_qty))
-                    initial_requested_precheck = unit_precheck if requested_qty == 1 else None
-                    qty, affordable_precheck, insufficient_precheck = affordable_buy_qty(
-                        headers,
-                        target_asset,
-                        requested_qty,
-                        initial_precheck=initial_requested_precheck,
-                    )
-                    if requested_qty > 0 and qty < requested_qty:
-                        insufficient_payload = (
-                            insufficient_precheck.get("payload") if insufficient_precheck else {}
-                        )
-                        orders_placed.append(
-                            {
-                                "action": "resize",
-                                "message": "Reduced buy size to fit available account currency cash",
-                                "requested_qty": requested_qty,
-                                "approved_qty": qty,
-                                "estimated_cash_required": insufficient_payload.get("EstimatedCashRequired"),
-                                "account_currency": refreshed_balance.get("account_currency"),
-                                "spending_power": refreshed_balance.get("account_spending_power"),
-                            }
+                    if estimated_unit_cost is None or estimated_unit_cost <= 0:
+                        raise RuntimeError(
+                            f"Saxo precheck did not return a valid account-currency cost for "
+                            f"{target_asset['symbol']}."
                         )
 
-                    if qty > 0:
-                        order_result = place_market_buy(headers, target_asset, qty)
-                        orders_placed.append(order_result)
-                        ensure_order_submission(order_result)
-                    else:
-                        failure_payload = (
-                            insufficient_precheck.get("payload") if insufficient_precheck else {}
-                        )
+                    desired_qty = max(1, int(refreshed_target_value / estimated_unit_cost))
+                    refreshed_position_value = abs(
+                        safe_float(refreshed_target_row.get("market_value")) if refreshed_target_row else 0.0
+                    )
+                    refreshed_gap = gap_ratio(refreshed_position_value, refreshed_target_value)
+
+                    if (
+                        refreshed_target_qty > 0
+                        and refreshed_gap is not None
+                        and refreshed_gap <= ALIGNMENT_TOLERANCE_PCT
+                    ):
                         orders_placed.append(
                             {
                                 "action": "skip",
-                                "message": "No affordable incremental order after Saxo precheck",
+                                "message": "Portfolio already aligned after refresh",
                                 "current_qty": refreshed_target_qty,
-                                "desired_qty": desired_qty,
-                                "requested_qty": requested_qty,
-                                "estimated_cash_required": failure_payload.get("EstimatedCashRequired"),
-                                "account_currency": refreshed_balance.get("account_currency"),
-                                "spending_power": refreshed_balance.get("account_spending_power"),
+                                "current_value": refreshed_position_value,
+                                "target_value": refreshed_target_value,
                             }
                         )
+                    elif refreshed_target_qty > desired_qty:
+                        raise RuntimeError(
+                            "Current target position exceeds desired size after refresh; "
+                            "manual review required before adding exposure."
+                        )
+                    else:
+                        requested_qty = max(0, desired_qty - int(refreshed_target_qty))
+                        initial_requested_precheck = unit_precheck if requested_qty == 1 else None
+                        qty, affordable_precheck, insufficient_precheck = affordable_buy_qty(
+                            headers,
+                            target_asset,
+                            requested_qty,
+                            initial_precheck=initial_requested_precheck,
+                        )
+                        if requested_qty > 0 and qty < requested_qty:
+                            insufficient_payload = (
+                                insufficient_precheck.get("payload") if insufficient_precheck else {}
+                            )
+                            orders_placed.append(
+                                {
+                                    "action": "resize",
+                                    "message": "Reduced buy size to fit available account currency cash",
+                                    "requested_qty": requested_qty,
+                                    "approved_qty": qty,
+                                    "estimated_cash_required": insufficient_payload.get("EstimatedCashRequired"),
+                                    "account_currency": refreshed_balance.get("account_currency"),
+                                    "spending_power": refreshed_balance.get("account_spending_power"),
+                                }
+                            )
+
+                        if qty > 0:
+                            order_result = place_market_buy(headers, target_asset, qty)
+                            orders_placed.append(order_result)
+                            ensure_order_submission(order_result)
+                        else:
+                            failure_payload = (
+                                insufficient_precheck.get("payload") if insufficient_precheck else {}
+                            )
+                            orders_placed.append(
+                                {
+                                    "action": "skip",
+                                    "message": "No affordable incremental order after Saxo precheck",
+                                    "current_qty": refreshed_target_qty,
+                                    "desired_qty": desired_qty,
+                                    "requested_qty": requested_qty,
+                                    "estimated_cash_required": failure_payload.get("EstimatedCashRequired"),
+                                    "account_currency": refreshed_balance.get("account_currency"),
+                                    "spending_power": refreshed_balance.get("account_spending_power"),
+                                }
+                            )
     except SaxoTemporaryThrottleError as exc:
         orders_placed.append(
             {
@@ -1038,5 +1054,5 @@ print(f"Account equity: {account_equity}")
 print(f"Hourly PnL: {hourly_pnl}")
 print(f"Open positions: {position_snapshot['positions_count']}")
 
-if execution_error:
+if execution_error and "insufficientcash" not in execution_error.lower():
     raise RuntimeError(execution_error)
