@@ -29,9 +29,14 @@ BRONZE_RT_MARKET = f"{CATALOG}.{SCHEMA}.bronze_rt_market_1h"
 BRONZE_BT_VIX = f"{CATALOG}.{SCHEMA}.bronze_bt_vix_1h"
 BRONZE_BT_VIX3M = f"{CATALOG}.{SCHEMA}.bronze_bt_vix3m_1h"
 BRONZE_RT_VIX = f"{CATALOG}.{SCHEMA}.bronze_rt_vix_1d"
+LIVE_MACRO_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_macro_events_live"
 
 VIX_Z_WINDOW_HOURS = 8760
 PRICE_CONTEXT_HOURS = 72
+LIVE_MACRO_INDICATORS = {
+    "CPIAUCSL": "CPIAUCSL",
+    "UMCSENT": "UMCSENT",
+}
 
 runtime_config = load_runtime_instrument_config(spark)
 PRIMARY_SYMBOL = runtime_config["primary_symbol"]
@@ -149,6 +154,68 @@ def load_macro_state(rt_ts):
     if not rows:
         raise ValueError(f"No macro carry-forward row found in {SILVER_HIST}")
     return rows[0]
+
+
+def load_live_macro_level(indicator_id, rt_ts):
+    if not spark.catalog.tableExists(LIVE_MACRO_TABLE):
+        return None
+
+    gating_filter = ""
+    if indicator_id == "UMCSENT":
+        gating_filter = (
+            "AND release_stage = 'final' "
+            "AND validation_status = 'validated' "
+        )
+
+    rows = spark.sql(
+        f"""
+        SELECT
+            observed_value,
+            status,
+            source_provider,
+            release_stage,
+            validation_status,
+            scheduled_release_ts
+        FROM {LIVE_MACRO_TABLE}
+        WHERE indicator_id = '{indicator_id}'
+          AND observed_value IS NOT NULL
+          AND status IN ('observed', 'reconciled_observed')
+          {gating_filter}
+          AND scheduled_release_ts <= TIMESTAMP('{rt_ts}')
+        ORDER BY scheduled_release_ts DESC, ingestion_ts DESC
+        LIMIT 1
+        """
+    ).collect()
+    if not rows:
+        return None
+    return rows[0]
+
+
+def compute_live_macro_zscore(table_name, value_column, current_value, rt_ts):
+    history_pdf = spark.sql(
+        f"""
+        SELECT timestamp, {value_column} AS value
+        FROM {table_name}
+        WHERE timestamp < TIMESTAMP('{rt_ts}')
+          AND {value_column} IS NOT NULL
+        ORDER BY timestamp DESC
+        LIMIT {VIX_Z_WINDOW_HOURS - 1}
+        """
+    ).toPandas()
+
+    if history_pdf.empty:
+        raise ValueError(f"Insufficient history in {table_name} to compute {value_column} z-score")
+
+    values = history_pdf["value"].astype(float).tolist()
+    values.reverse()
+    values.append(float(current_value))
+
+    series = pd.Series(values, dtype="float64")
+    mean_val = float(series.mean())
+    std_val = float(series.std(ddof=1)) if len(series) > 1 else 0.0
+    if math.isnan(std_val) or std_val == 0.0:
+        return 0.0
+    return (float(current_value) - mean_val) / std_val
 
 
 def load_market_history(rt_ts, lookback_hours):
@@ -279,6 +346,45 @@ ensure_target_table()
 
 rt_ts, spy_close, vix_close, vix3m_close, vix_latest_date = load_latest_rt_inputs()
 macro_state = load_macro_state(rt_ts)
+live_macro_source = {"CPIAUCSL": "bt_silver", "UMCSENT": "bt_silver"}
+macro_features = {
+    "CPIAUCSL_z": to_py_float(macro_state["CPIAUCSL_z"]),
+    "UMCSENT_z": to_py_float(macro_state["UMCSENT_z"]),
+    "CPI_Event_Active": int(macro_state["CPI_Event_Active"]),
+    "NFP_Event_Active": int(macro_state["NFP_Event_Active"]),
+}
+
+for indicator_id, raw_col in LIVE_MACRO_INDICATORS.items():
+    live_row = load_live_macro_level(indicator_id, rt_ts)
+    if not live_row:
+        continue
+
+    observed_value = to_py_float(live_row["observed_value"])
+    if observed_value is None:
+        continue
+
+    try:
+        macro_state_key = f"{indicator_id}_z"
+        macro_raw_z = compute_live_macro_zscore(SILVER_HIST, raw_col, observed_value, rt_ts)
+        macro_features[macro_state_key] = to_py_float(macro_raw_z)
+        live_macro_source[indicator_id] = f"live_{live_row['source_provider']}"
+        print(
+            f"Using live macro value for {indicator_id}: source={live_row['source_provider']} "
+            f"status={live_row['status']} "
+            f"release_stage={live_row['release_stage']} "
+            f"validation_status={live_row['validation_status']} "
+            f"scheduled_release={live_row['scheduled_release_ts']} "
+            f"value={observed_value} z={macro_raw_z:.6f}"
+        )
+    except Exception as exc:
+        print(f"Live macro override failed for {indicator_id}: {exc}")
+
+macro_source = (
+    "rt_enrichment_live_recompute+"
+    f"{','.join([k for k, v in live_macro_source.items() if v.startswith('live_')])}"
+)
+if macro_source == "rt_enrichment_live_recompute+":
+    macro_source = "rt_enrichment_live_recompute"
 price_mom_24h = compute_live_price_momentum(rt_ts, spy_close)
 vixcls_z_rt = compute_live_zscore(BRONZE_BT_VIX, "close", vix_close, rt_ts)
 vix3m_z_rt = compute_live_zscore(
@@ -305,23 +411,22 @@ print(f"Bias gate passed | VIX date: {vix_latest_date.date()}")
 rt_row = {
     "timestamp": rt_ts,
     "SPY_close": to_py_float(spy_close),
-    "CPIAUCSL_z": to_py_float(macro_state["CPIAUCSL_z"]),
+    "CPIAUCSL_z": macro_features["CPIAUCSL_z"],
     "PCEPI_z": to_py_float(macro_state["PCEPI_z"]),
     "PCE_z": to_py_float(macro_state["PCE_z"]),
     "PAYEMS_z": to_py_float(macro_state["PAYEMS_z"]),
     "UNRATE_z": to_py_float(macro_state["UNRATE_z"]),
     "GDPC1_z": to_py_float(macro_state["GDPC1_z"]),
     "INDPRO_z": to_py_float(macro_state["INDPRO_z"]),
-    "UMCSENT_z": to_py_float(macro_state["UMCSENT_z"]),
-    # Macro remains a carry-forward from batch silver. Live recompute is limited
-    # to the market/VIX-derived features so hourly runtime stays lightweight.
+    "UMCSENT_z": macro_features["UMCSENT_z"],
+    # CPI/UMCSENT can be recomputed from latest Finnhub-live macro value.
     "VIXCLS_z": to_py_float(vixcls_z_rt),
     "vix3m_z": to_py_float(vix3m_z_rt),
     "VIX_Inversion_Z": to_py_float(vix_inversion_z_rt),
     "Price_Mom_24H": to_py_float(price_mom_24h),
-    "CPI_Event_Active": int(macro_state["CPI_Event_Active"]),
-    "NFP_Event_Active": int(macro_state["NFP_Event_Active"]),
-    "source": "rt_enrichment_live_recompute",
+    "CPI_Event_Active": macro_features["CPI_Event_Active"],
+    "NFP_Event_Active": macro_features["NFP_Event_Active"],
+    "source": macro_source,
 }
 
 schema = StructType(

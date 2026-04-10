@@ -37,8 +37,25 @@
       }
     },
     {
+      "task_key": "rt_01b_macro_events",
+      "depends_on": [{"task_key": "rt_01_market"}],
+      "existing_cluster_id": "0311-005159-pm2x3pce",
+      "max_retries": 2,
+      "min_retry_interval_millis": 120000,
+      "retry_on_timeout": true,
+      "libraries": [
+        {"pypi": {"package": "finnhub-python==2.4.25"}}
+      ],
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/02_RT_Live_Macro_Events"
+      }
+    },
+    {
       "task_key": "rt_03_silver",
-      "depends_on": [{"task_key": "rt_02_vix"}],
+      "depends_on": [
+        {"task_key": "rt_01b_macro_events"},
+        {"task_key": "rt_02_vix"}
+      ],
       "existing_cluster_id": "0311-005159-pm2x3pce",
       "max_retries": 2,
       "min_retry_interval_millis": 120000,
