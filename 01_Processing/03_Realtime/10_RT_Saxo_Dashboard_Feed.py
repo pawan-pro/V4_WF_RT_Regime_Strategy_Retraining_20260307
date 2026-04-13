@@ -261,6 +261,28 @@ def parse_json_payload(value: Any) -> Optional[Any]:
         return None
 
 
+def extract_order_events(orders_payload: Any) -> list[dict]:
+    """Return order action events from payload in a stable parser style."""
+    parsed = parse_json_payload(orders_payload)
+    if isinstance(parsed, dict):
+        if "orders_placed" in parsed and isinstance(parsed.get("orders_placed"), list):
+            return [event for event in parsed["orders_placed"] if isinstance(event, dict)]
+        if maybe_str(parsed.get("action")) is not None:
+            return [parsed]
+        return []
+    if isinstance(parsed, list):
+        return [event for event in parsed if isinstance(event, dict)]
+    return []
+
+
+def normalize_action_name(value: Any) -> Optional[str]:
+    """Return a case-insensitive action token."""
+    text = maybe_str(value)
+    if text is None:
+        return None
+    return text.strip().lower()
+
+
 def normalize_ticker(ticker: Any) -> str:
     """Normalize ticker labels for lightweight comparisons."""
     text = maybe_str(ticker)
@@ -291,18 +313,18 @@ def most_recent_timestamp(*timestamps: Optional[datetime]) -> Optional[datetime]
 
 def parse_last_action_reason(orders_payload: Any, action: str) -> Optional[str]:
     """Return the most recent reason/message for a specific action."""
-    data = parse_json_payload(orders_payload)
-    if not isinstance(data, list):
+    data = extract_order_events(orders_payload)
+    if not data:
         return None
 
-    target_action = maybe_str(action)
+    target_action = normalize_action_name(action)
     if target_action is None:
         return None
 
     for event in reversed(data):
         if not isinstance(event, dict):
             continue
-        if maybe_str(event.get("action")) != target_action:
+        if normalize_action_name(event.get("action")) != target_action:
             continue
         reason = (
             maybe_str(event.get("message"))
@@ -856,42 +878,38 @@ def load_audit_health(execution_mode: str) -> dict[str, Optional[float] | Option
 
 
 def load_execution_action_health(execution_mode: str) -> dict[str, int]:
-    """Count skip/error actions from recent trade rows."""
+    """Count skip/error actions from recent trade rows using same parser rules as reasons."""
     if not table_exists(TRADE_LOG):
         return {"last_skip_count_24h": 0, "last_error_count_24h": 0}
 
-    row = scalar_row(
-        f"""
-        SELECT
-            COALESCE(
-                SUM(
-                    CASE
-                        WHEN lower(coalesce(orders_placed, '')) RLIKE '\\"action\\"\\s*:\\s*\\"skip\\"'
-                        THEN 1 ELSE 0
-                    END
-                ),
-                0
-            ) AS last_skip_count_24h,
-            COALESCE(
-                SUM(
-                    CASE
-                        WHEN lower(coalesce(orders_placed, '')) RLIKE '\\"action\\"\\s*:\\s*\\"error\\"'
-                        THEN 1 ELSE 0
-                    END
-                ),
-                0
-            ) AS last_error_count_24h
-        FROM {TRADE_LOG}
-        WHERE execution_mode = '{execution_mode}'
-          AND trade_ts >= TIMESTAMPADD(HOUR, -24, CURRENT_TIMESTAMP())
-        """
+    rows = (
+        spark.sql(
+            f"""
+            SELECT orders_placed
+            FROM {TRADE_LOG}
+            WHERE execution_mode = '{execution_mode}'
+              AND trade_ts >= TIMESTAMPADD(HOUR, -24, CURRENT_TIMESTAMP())
+              AND trade_ts IS NOT NULL
+            """
+        ).collect()
     )
-    if not row:
+
+    if not rows:
         return {"last_skip_count_24h": 0, "last_error_count_24h": 0}
 
+    skip_count = 0
+    error_count = 0
+    for row in rows:
+        for event in extract_order_events(row["orders_placed"]):
+            action = normalize_action_name(event.get("action"))
+            if action == "skip":
+                skip_count += 1
+            elif action == "error":
+                error_count += 1
+
     return {
-        "last_skip_count_24h": maybe_int(row["last_skip_count_24h"]) or 0,
-        "last_error_count_24h": maybe_int(row["last_error_count_24h"]) or 0,
+        "last_skip_count_24h": skip_count,
+        "last_error_count_24h": error_count,
     }
 
 
