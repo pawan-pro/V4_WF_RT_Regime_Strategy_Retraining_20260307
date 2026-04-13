@@ -1,8 +1,8 @@
 # Databricks notebook source
 # RT_10: Saxo dashboard feed (canonical live producer)
 
-# MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config
-# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
+# MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config.py
+# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils.py
 
 from datetime import datetime, timezone
 from typing import Any, Optional
