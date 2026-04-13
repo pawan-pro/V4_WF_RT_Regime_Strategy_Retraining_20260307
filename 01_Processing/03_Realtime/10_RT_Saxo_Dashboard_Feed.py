@@ -5,9 +5,13 @@
 # MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
 
 from datetime import datetime, timezone
+import json
+import random
+import time
 from typing import Any, Optional
 
 from pyspark.sql import Row
+from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     DoubleType,
     IntegerType,
@@ -16,6 +20,174 @@ from pyspark.sql.types import (
     StructType,
     TimestampType,
 )
+
+# ---------------------------------------------------------------------------
+# Fallbacks for helper modules if `%run` imports are unavailable in this runtime.
+# ---------------------------------------------------------------------------
+if "load_runtime_instrument_config" not in globals():
+    DEFAULT_CATALOG = "pawan_quant_research_1"
+    DEFAULT_SCHEMA = "v4"
+
+    def runtime_config_table(catalog=DEFAULT_CATALOG, schema=DEFAULT_SCHEMA):
+        return f"{catalog}.{schema}.rt_runtime_instrument_config"
+
+    def ensure_runtime_instrument_config_table(spark, catalog=DEFAULT_CATALOG, schema=DEFAULT_SCHEMA):
+        table_name = runtime_config_table(catalog, schema)
+        spark.sql(
+            f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                config_name STRING,
+                market_symbols_csv STRING,
+                primary_symbol STRING,
+                secondary_symbol STRING,
+                regime_0_ticker STRING,
+                regime_1_ticker STRING,
+                regime_2_ticker STRING,
+                data_source STRING,
+                trading_source STRING,
+                notes STRING,
+                updated_ts TIMESTAMP,
+                updated_by STRING
+            )
+            USING DELTA
+            """
+        )
+        row_count = spark.sql(f"SELECT COUNT(*) AS n FROM {table_name}").collect()[0]["n"]
+        if row_count == 0:
+            spark.sql(
+                f"""
+                INSERT INTO {table_name}
+                VALUES (
+                    'default_live',
+                    'SPY,QQQ',
+                    'SPY',
+                    'QQQ',
+                    'QQQ',
+                    'SPY',
+                    NULL,
+                    'alpaca_stocks',
+                    'alpaca_paper',
+                    'Fallback live runtime mapping for Saxo dashboard',
+                    current_timestamp(),
+                    current_user()
+                )
+                """
+            )
+        return table_name
+
+    def _target_position_label(ticker):
+        return f"100% {ticker}" if ticker else "100% CASH"
+
+    def load_runtime_instrument_config(
+        spark, catalog=DEFAULT_CATALOG, schema=DEFAULT_SCHEMA
+    ):
+        table_name = ensure_runtime_instrument_config_table(spark, catalog, schema)
+        row = spark.sql(
+            f"""
+            SELECT *
+            FROM {table_name}
+            ORDER BY updated_ts DESC
+            LIMIT 1
+            """
+        ).collect()[0]
+        market_symbols = [
+            symbol.strip()
+            for symbol in (row["market_symbols_csv"] or "").split(",")
+            if symbol.strip()
+        ]
+        primary_symbol = row["primary_symbol"] or (market_symbols[0] if market_symbols else None)
+        secondary_symbol = row["secondary_symbol"] or (
+            market_symbols[1] if len(market_symbols) > 1 else primary_symbol
+        )
+        regime_ticker = {
+            0: row["regime_0_ticker"],
+            1: row["regime_1_ticker"],
+            2: row["regime_2_ticker"] or None,
+        }
+        return {
+            "table_name": table_name,
+            "config_name": row["config_name"],
+            "market_symbols": market_symbols,
+            "primary_symbol": primary_symbol,
+            "secondary_symbol": secondary_symbol,
+            "regime_ticker": regime_ticker,
+            "position_map": {
+                regime: _target_position_label(ticker)
+                for regime, ticker in regime_ticker.items()
+            },
+            "data_source": row["data_source"],
+            "trading_source": row["trading_source"],
+            "notes": row["notes"],
+            "updated_ts": row["updated_ts"],
+            "updated_by": row["updated_by"],
+        }
+
+
+if "overwrite_dataframe_with_retry" not in globals():
+    RETRYABLE_DELTA_MARKERS = (
+        "ConcurrentAppendException",
+        "[DELTA_CONCURRENT_APPEND]",
+        "ConcurrentWriteException",
+        "[DELTA_CONCURRENT_WRITE]",
+        "MetadataChangedException",
+        "[DELTA_METADATA_CHANGED]",
+    )
+
+    def is_retryable_delta_conflict(exc):
+        message = str(exc)
+        return any(marker in message for marker in RETRYABLE_DELTA_MARKERS)
+
+    def run_with_retry(
+        operation_name,
+        operation,
+        max_attempts=4,
+        initial_wait_seconds=5,
+        backoff_multiplier=2.0,
+        max_wait_seconds=60,
+        jitter_seconds=1.0,
+    ):
+        attempt = 1
+        while True:
+            try:
+                return operation()
+            except Exception as exc:
+                if not is_retryable_delta_conflict(exc) or attempt >= max_attempts:
+                    raise
+                base_wait = min(
+                    max_wait_seconds,
+                    initial_wait_seconds * (backoff_multiplier ** (attempt - 1)),
+                )
+                sleep_seconds = base_wait + random.uniform(0, jitter_seconds)
+                print(
+                    f"{operation_name} hit a retryable Delta conflict on attempt "
+                    f"{attempt}/{max_attempts}: {exc}"
+                )
+                print(f"Retrying after {sleep_seconds:.1f}s")
+                time.sleep(sleep_seconds)
+                attempt += 1
+
+    def overwrite_dataframe_with_retry(
+        dataframe,
+        table_name,
+        options=None,
+        operation_name=None,
+        **retry_kwargs,
+    ):
+        spark_session = SparkSession.getActiveSession()
+        if spark_session is None:
+            raise RuntimeError("No active Spark session available for Delta overwrite retry helper.")
+
+        def write_once():
+            writer = dataframe.write.format("delta").mode("overwrite")
+            for option_key, option_value in (options or {}).items():
+                writer = writer.option(option_key, option_value)
+            writer.saveAsTable(table_name)
+
+        return run_with_retry(
+            operation_name or f"overwrite {table_name}",
+            write_once,
+            **retry_kwargs,
+        )
 
 # ---------------------------------------------------------------------------
 # Constants and table locations
@@ -72,6 +244,53 @@ def maybe_str(value: Any) -> Optional[str]:
     return text if text else None
 
 
+def parse_json_payload(value: Any) -> Optional[Any]:
+    """Parse a JSON payload from string-backed fields with defensive fallback."""
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def extract_order_events(orders_payload: Any) -> list[dict]:
+    """Return order action events from payload in a stable parser style."""
+    parsed = parse_json_payload(orders_payload)
+    if isinstance(parsed, dict):
+        if "orders_placed" in parsed and isinstance(parsed.get("orders_placed"), list):
+            return [event for event in parsed["orders_placed"] if isinstance(event, dict)]
+        if maybe_str(parsed.get("action")) is not None:
+            return [parsed]
+        return []
+    if isinstance(parsed, list):
+        return [event for event in parsed if isinstance(event, dict)]
+    return []
+
+
+def normalize_action_name(value: Any) -> Optional[str]:
+    """Return a case-insensitive action token."""
+    text = maybe_str(value)
+    if text is None:
+        return None
+    return text.strip().lower()
+
+
+def normalize_ticker(ticker: Any) -> str:
+    """Normalize ticker labels for lightweight comparisons."""
+    text = maybe_str(ticker)
+    if text is None:
+        return ""
+    return text.strip().upper()
+
+
 def safe_ts(row: Any, key: str) -> Optional[datetime]:
     """Extract a datetime field from a Spark Row-like object."""
     if row is None:
@@ -84,6 +303,96 @@ def safe_ts(row: Any, key: str) -> Optional[datetime]:
 
 def table_exists(table_name: str) -> bool:
     return spark.catalog.tableExists(table_name)
+
+
+def most_recent_timestamp(*timestamps: Optional[datetime]) -> Optional[datetime]:
+    """Return the newest non-null timestamp in a tiny candidate set."""
+    valid = [ts for ts in timestamps if isinstance(ts, datetime)]
+    return max(valid) if valid else None
+
+
+def parse_last_action_reason(orders_payload: Any, action: str) -> Optional[str]:
+    """Return the most recent reason/message for a specific action."""
+    data = extract_order_events(orders_payload)
+    if not data:
+        return None
+
+    target_action = normalize_action_name(action)
+    if target_action is None:
+        return None
+
+    for event in reversed(data):
+        if not isinstance(event, dict):
+            continue
+        if normalize_action_name(event.get("action")) != target_action:
+            continue
+        reason = (
+            maybe_str(event.get("message"))
+            or maybe_str(event.get("reason"))
+            or maybe_str(event.get("error"))
+        )
+        if reason is not None:
+            return reason
+    return None
+
+
+def parse_actual_allocation_state(
+    positions_payload: Any,
+    target_ticker: Optional[str],
+    account_equity: Optional[float],
+    account_cash: Optional[float],
+) -> tuple[Optional[str], Optional[float], Optional[float]]:
+    """
+    Parse lightweight position summary for:
+    - actual_ticker
+    - actual_cash_pct
+    - allocation_delta_bp (target-vs-actual exposure deviation in basis points)
+    """
+    positions = parse_json_payload(positions_payload)
+    if not isinstance(positions, list):
+        return ("CASH" if account_equity is not None and account_cash is not None else None, None, None)
+
+    equity = maybe_float(account_equity)
+    cash = maybe_float(account_cash)
+
+    symbol_to_mv: dict[str, float] = {}
+    for row in positions:
+        if not isinstance(row, dict):
+            continue
+        symbol = maybe_str(row.get("symbol"))
+        if symbol is None:
+            continue
+        market_value = maybe_float(row.get("market_value"))
+        if market_value is None:
+            continue
+        symbol_to_mv[symbol] = symbol_to_mv.get(symbol, 0.0) + abs(market_value)
+
+    actual_ticker: Optional[str] = None
+    if symbol_to_mv:
+        actual_ticker = max(symbol_to_mv, key=lambda symbol: symbol_to_mv[symbol])
+    elif account_equity is not None:
+        actual_ticker = "CASH"
+
+    if equity is None or equity == 0.0:
+        return actual_ticker, None, None
+
+    actual_cash_pct = cash / equity if cash is not None else None
+
+    total_abs_mv = sum(symbol_to_mv.values())
+    target_norm = normalize_ticker(target_ticker)
+    is_target_cash = target_norm in {"", "CASH", "100% CASH", "NONE", "NULL", "N/A"}
+
+    if is_target_cash:
+        target_weight_bp = 0.0
+        actual_weight_bp = (total_abs_mv / equity) * 10000.0
+    else:
+        target_weight_bp = 10000.0
+        target_mv = symbol_to_mv.get(target_ticker, 0.0)
+        actual_weight_bp = (abs(target_mv) / equity) * 10000.0 if target_mv else 0.0
+
+    allocation_delta_bp = abs(target_weight_bp - actual_weight_bp)
+
+    return actual_ticker, maybe_float(actual_cash_pct), maybe_float(allocation_delta_bp)
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +519,9 @@ def ensure_target_table(schema: StructType) -> None:
             alpha_pct DOUBLE,
             drawdown_pct DOUBLE,
             regime_drawdown_pct DOUBLE,
+            regime_age_hours DOUBLE,
+            regime_elapsed_days DOUBLE,
+            equity_vs_cash_ratio DOUBLE,
             total_cycles INT,
             total_switches INT,
             peak_equity DOUBLE,
@@ -221,6 +533,14 @@ def ensure_target_table(schema: StructType) -> None:
             audit_rows_last_24h INT,
             latest_audit_ts TIMESTAMP,
             audit_lag_minutes DOUBLE,
+            actual_ticker STRING,
+            allocation_delta_bp DOUBLE,
+            actual_cash_pct DOUBLE,
+            dashboard_data_freshness_minutes DOUBLE,
+            last_skip_reason STRING,
+            last_error_reason STRING,
+            last_skip_count_24h INT,
+            last_error_count_24h INT,
             execution_mode STRING,
             vix_source_date STRING,
             model_version STRING,
@@ -557,6 +877,42 @@ def load_audit_health(execution_mode: str) -> dict[str, Optional[float] | Option
     }
 
 
+def load_execution_action_health(execution_mode: str) -> dict[str, int]:
+    """Count skip/error actions from recent trade rows using same parser rules as reasons."""
+    if not table_exists(TRADE_LOG):
+        return {"last_skip_count_24h": 0, "last_error_count_24h": 0}
+
+    rows = (
+        spark.sql(
+            f"""
+            SELECT orders_placed
+            FROM {TRADE_LOG}
+            WHERE execution_mode = '{execution_mode}'
+              AND trade_ts >= TIMESTAMPADD(HOUR, -24, CURRENT_TIMESTAMP())
+              AND trade_ts IS NOT NULL
+            """
+        ).collect()
+    )
+
+    if not rows:
+        return {"last_skip_count_24h": 0, "last_error_count_24h": 0}
+
+    skip_count = 0
+    error_count = 0
+    for row in rows:
+        for event in extract_order_events(row["orders_placed"]):
+            action = normalize_action_name(event.get("action"))
+            if action == "skip":
+                skip_count += 1
+            elif action == "error":
+                error_count += 1
+
+    return {
+        "last_skip_count_24h": skip_count,
+        "last_error_count_24h": error_count,
+    }
+
+
 def load_vix_source_date() -> Optional[Any]:
     row = scalar_row(
         f"""
@@ -626,6 +982,9 @@ def build_output_schema() -> StructType:
             StructField("alpha_pct", DoubleType(), True),
             StructField("drawdown_pct", DoubleType(), True),
             StructField("regime_drawdown_pct", DoubleType(), True),
+            StructField("regime_age_hours", DoubleType(), True),
+            StructField("regime_elapsed_days", DoubleType(), True),
+            StructField("equity_vs_cash_ratio", DoubleType(), True),
             StructField("total_cycles", IntegerType(), True),
             StructField("total_switches", IntegerType(), True),
             StructField("peak_equity", DoubleType(), True),
@@ -637,6 +996,14 @@ def build_output_schema() -> StructType:
             StructField("audit_rows_last_24h", IntegerType(), True),
             StructField("latest_audit_ts", TimestampType(), True),
             StructField("audit_lag_minutes", DoubleType(), True),
+            StructField("actual_ticker", StringType(), True),
+            StructField("allocation_delta_bp", DoubleType(), True),
+            StructField("actual_cash_pct", DoubleType(), True),
+            StructField("dashboard_data_freshness_minutes", DoubleType(), True),
+            StructField("last_skip_reason", StringType(), True),
+            StructField("last_error_reason", StringType(), True),
+            StructField("last_skip_count_24h", IntegerType(), True),
+            StructField("last_error_count_24h", IntegerType(), True),
             StructField("execution_mode", StringType(), True),
             StructField("vix_source_date", StringType(), True),
             StructField("model_version", StringType(), True),
@@ -648,6 +1015,7 @@ def build_output_schema() -> StructType:
 
 def main() -> None:
     execution_mode = resolve_execution_mode()
+    dashboard_ts = datetime.now(timezone.utc).replace(tzinfo=None)
 
     signal_row = load_latest_signal()
     silver_row = load_latest_silver()
@@ -690,13 +1058,47 @@ def main() -> None:
         regime_start_ts=current_regime_start_ts,
     )
 
+    trade_ts = safe_ts(trade_row, "trade_ts") if trade_row else None
+    target_ticker = maybe_str(trade_row["target_ticker"]) if trade_row else None
+    account_cash = maybe_float(trade_row["account_cash"]) if trade_row else None
+    actual_ticker, actual_cash_pct, allocation_delta_bp = parse_actual_allocation_state(
+        positions_payload=trade_row["positions_json"] if trade_row else None,
+        target_ticker=target_ticker,
+        account_equity=latest_equity,
+        account_cash=account_cash,
+    )
+
+    equity_vs_cash_ratio = None
+    if latest_equity is not None and account_cash not in (None, 0.0):
+        equity_vs_cash_ratio = latest_equity / account_cash
+
+    execution_actions_health = load_execution_action_health(execution_mode)
+    most_recent_payload_ts = most_recent_timestamp(signal_ts, trade_ts, latest_audit_ts)
+    dashboard_data_freshness_minutes = None
+    if most_recent_payload_ts is not None:
+        try:
+            dashboard_data_freshness_minutes = (
+                (dashboard_ts - most_recent_payload_ts).total_seconds() / 60.0
+            )
+        except Exception:
+            dashboard_data_freshness_minutes = None
+
+    regime_age_hours = None
+    regime_elapsed_days = None
+    if current_regime_start_ts is not None:
+        try:
+            regime_age_hours = (dashboard_ts - current_regime_start_ts).total_seconds() / 3600.0
+            regime_elapsed_days = regime_age_hours / 24.0
+        except Exception:
+            regime_age_hours = None
+            regime_elapsed_days = None
+
     macro_last_release = None
     if table_exists(MACRO_TABLE):
         macro_last = scalar_row(f"SELECT MAX(timestamp) AS macro_last_release_ts FROM {MACRO_TABLE}")
         if macro_last:
             macro_last_release = macro_last["macro_last_release_ts"]
 
-    dashboard_ts = datetime.now(timezone.utc).replace(tzinfo=None)
     price_ts = None
     if table_exists(MARKET_TABLE):
         price_ts_row = scalar_row(f"SELECT MAX(timestamp) AS max_ts FROM {MARKET_TABLE}")
@@ -707,7 +1109,7 @@ def main() -> None:
         "feed_ts": dashboard_ts,
         "dashboard_ts": dashboard_ts,
         "signal_ts": signal_ts,
-        "trade_ts": safe_ts(trade_row, "trade_ts") if trade_row else None,
+        "trade_ts": trade_ts,
         "audit_ts": latest_audit_ts,
         "current_regime_start_ts": current_regime_start_ts,
         "price_ts": price_ts,
@@ -749,6 +1151,9 @@ def main() -> None:
         "alpha_pct": alpha_pct,
         "drawdown_pct": drawdown_pct,
         "regime_drawdown_pct": regime_drawdown_pct,
+        "regime_age_hours": maybe_float(regime_age_hours),
+        "regime_elapsed_days": maybe_float(regime_elapsed_days),
+        "equity_vs_cash_ratio": maybe_float(equity_vs_cash_ratio),
         "total_cycles": portfolio.get("total_cycles"),
         "total_switches": portfolio.get("total_switches"),
         "peak_equity": portfolio.get("peak_equity"),
@@ -760,6 +1165,20 @@ def main() -> None:
         "audit_rows_last_24h": audit_health["audit_rows_last_24h"],
         "latest_audit_ts": audit_health["latest_audit_ts"],
         "audit_lag_minutes": audit_health["audit_lag_minutes"],
+        "actual_ticker": actual_ticker,
+        "allocation_delta_bp": allocation_delta_bp,
+        "actual_cash_pct": maybe_float(actual_cash_pct),
+        "dashboard_data_freshness_minutes": maybe_float(dashboard_data_freshness_minutes),
+        "last_skip_reason": parse_last_action_reason(
+            trade_row["orders_placed"] if trade_row else None,
+            "skip",
+        ),
+        "last_error_reason": parse_last_action_reason(
+            trade_row["orders_placed"] if trade_row else None,
+            "error",
+        ),
+        "last_skip_count_24h": execution_actions_health["last_skip_count_24h"],
+        "last_error_count_24h": execution_actions_health["last_error_count_24h"],
         "execution_mode": execution_mode,
         "vix_source_date": load_vix_source_date(),
         "model_version": get_model_version(maybe_str(signal_row["model_version"]) or "bootstrap_live_model"),
