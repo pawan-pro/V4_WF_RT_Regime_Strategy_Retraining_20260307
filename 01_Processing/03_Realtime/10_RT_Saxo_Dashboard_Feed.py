@@ -5,6 +5,7 @@
 # MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
 
 from datetime import datetime, timezone
+import json
 import random
 import time
 from typing import Any, Optional
@@ -243,6 +244,31 @@ def maybe_str(value: Any) -> Optional[str]:
     return text if text else None
 
 
+def parse_json_payload(value: Any) -> Optional[Any]:
+    """Parse a JSON payload from string-backed fields with defensive fallback."""
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def normalize_ticker(ticker: Any) -> str:
+    """Normalize ticker labels for lightweight comparisons."""
+    text = maybe_str(ticker)
+    if text is None:
+        return ""
+    return text.strip().upper()
+
+
 def safe_ts(row: Any, key: str) -> Optional[datetime]:
     """Extract a datetime field from a Spark Row-like object."""
     if row is None:
@@ -255,6 +281,96 @@ def safe_ts(row: Any, key: str) -> Optional[datetime]:
 
 def table_exists(table_name: str) -> bool:
     return spark.catalog.tableExists(table_name)
+
+
+def most_recent_timestamp(*timestamps: Optional[datetime]) -> Optional[datetime]:
+    """Return the newest non-null timestamp in a tiny candidate set."""
+    valid = [ts for ts in timestamps if isinstance(ts, datetime)]
+    return max(valid) if valid else None
+
+
+def parse_last_action_reason(orders_payload: Any, action: str) -> Optional[str]:
+    """Return the most recent reason/message for a specific action."""
+    data = parse_json_payload(orders_payload)
+    if not isinstance(data, list):
+        return None
+
+    target_action = maybe_str(action)
+    if target_action is None:
+        return None
+
+    for event in reversed(data):
+        if not isinstance(event, dict):
+            continue
+        if maybe_str(event.get("action")) != target_action:
+            continue
+        reason = (
+            maybe_str(event.get("message"))
+            or maybe_str(event.get("reason"))
+            or maybe_str(event.get("error"))
+        )
+        if reason is not None:
+            return reason
+    return None
+
+
+def parse_actual_allocation_state(
+    positions_payload: Any,
+    target_ticker: Optional[str],
+    account_equity: Optional[float],
+    account_cash: Optional[float],
+) -> tuple[Optional[str], Optional[float], Optional[float]]:
+    """
+    Parse lightweight position summary for:
+    - actual_ticker
+    - actual_cash_pct
+    - allocation_delta_bp (target-vs-actual exposure deviation in basis points)
+    """
+    positions = parse_json_payload(positions_payload)
+    if not isinstance(positions, list):
+        return ("CASH" if account_equity is not None and account_cash is not None else None, None, None)
+
+    equity = maybe_float(account_equity)
+    cash = maybe_float(account_cash)
+
+    symbol_to_mv: dict[str, float] = {}
+    for row in positions:
+        if not isinstance(row, dict):
+            continue
+        symbol = maybe_str(row.get("symbol"))
+        if symbol is None:
+            continue
+        market_value = maybe_float(row.get("market_value"))
+        if market_value is None:
+            continue
+        symbol_to_mv[symbol] = symbol_to_mv.get(symbol, 0.0) + abs(market_value)
+
+    actual_ticker: Optional[str] = None
+    if symbol_to_mv:
+        actual_ticker = max(symbol_to_mv, key=lambda symbol: symbol_to_mv[symbol])
+    elif account_equity is not None:
+        actual_ticker = "CASH"
+
+    if equity is None or equity == 0.0:
+        return actual_ticker, None, None
+
+    actual_cash_pct = cash / equity if cash is not None else None
+
+    total_abs_mv = sum(symbol_to_mv.values())
+    target_norm = normalize_ticker(target_ticker)
+    is_target_cash = target_norm in {"", "CASH", "100% CASH", "NONE", "NULL", "N/A"}
+
+    if is_target_cash:
+        target_weight_bp = 0.0
+        actual_weight_bp = (total_abs_mv / equity) * 10000.0
+    else:
+        target_weight_bp = 10000.0
+        target_mv = symbol_to_mv.get(target_ticker, 0.0)
+        actual_weight_bp = (abs(target_mv) / equity) * 10000.0 if target_mv else 0.0
+
+    allocation_delta_bp = abs(target_weight_bp - actual_weight_bp)
+
+    return actual_ticker, maybe_float(actual_cash_pct), maybe_float(allocation_delta_bp)
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +497,9 @@ def ensure_target_table(schema: StructType) -> None:
             alpha_pct DOUBLE,
             drawdown_pct DOUBLE,
             regime_drawdown_pct DOUBLE,
+            regime_age_hours DOUBLE,
+            regime_elapsed_days DOUBLE,
+            equity_vs_cash_ratio DOUBLE,
             total_cycles INT,
             total_switches INT,
             peak_equity DOUBLE,
@@ -392,6 +511,14 @@ def ensure_target_table(schema: StructType) -> None:
             audit_rows_last_24h INT,
             latest_audit_ts TIMESTAMP,
             audit_lag_minutes DOUBLE,
+            actual_ticker STRING,
+            allocation_delta_bp DOUBLE,
+            actual_cash_pct DOUBLE,
+            dashboard_data_freshness_minutes DOUBLE,
+            last_skip_reason STRING,
+            last_error_reason STRING,
+            last_skip_count_24h INT,
+            last_error_count_24h INT,
             execution_mode STRING,
             vix_source_date STRING,
             model_version STRING,
@@ -728,6 +855,46 @@ def load_audit_health(execution_mode: str) -> dict[str, Optional[float] | Option
     }
 
 
+def load_execution_action_health(execution_mode: str) -> dict[str, int]:
+    """Count skip/error actions from recent trade rows."""
+    if not table_exists(TRADE_LOG):
+        return {"last_skip_count_24h": 0, "last_error_count_24h": 0}
+
+    row = scalar_row(
+        f"""
+        SELECT
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN lower(coalesce(orders_placed, '')) RLIKE '\\"action\\"\\s*:\\s*\\"skip\\"'
+                        THEN 1 ELSE 0
+                    END
+                ),
+                0
+            ) AS last_skip_count_24h,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN lower(coalesce(orders_placed, '')) RLIKE '\\"action\\"\\s*:\\s*\\"error\\"'
+                        THEN 1 ELSE 0
+                    END
+                ),
+                0
+            ) AS last_error_count_24h
+        FROM {TRADE_LOG}
+        WHERE execution_mode = '{execution_mode}'
+          AND trade_ts >= TIMESTAMPADD(HOUR, -24, CURRENT_TIMESTAMP())
+        """
+    )
+    if not row:
+        return {"last_skip_count_24h": 0, "last_error_count_24h": 0}
+
+    return {
+        "last_skip_count_24h": maybe_int(row["last_skip_count_24h"]) or 0,
+        "last_error_count_24h": maybe_int(row["last_error_count_24h"]) or 0,
+    }
+
+
 def load_vix_source_date() -> Optional[Any]:
     row = scalar_row(
         f"""
@@ -797,6 +964,9 @@ def build_output_schema() -> StructType:
             StructField("alpha_pct", DoubleType(), True),
             StructField("drawdown_pct", DoubleType(), True),
             StructField("regime_drawdown_pct", DoubleType(), True),
+            StructField("regime_age_hours", DoubleType(), True),
+            StructField("regime_elapsed_days", DoubleType(), True),
+            StructField("equity_vs_cash_ratio", DoubleType(), True),
             StructField("total_cycles", IntegerType(), True),
             StructField("total_switches", IntegerType(), True),
             StructField("peak_equity", DoubleType(), True),
@@ -808,6 +978,14 @@ def build_output_schema() -> StructType:
             StructField("audit_rows_last_24h", IntegerType(), True),
             StructField("latest_audit_ts", TimestampType(), True),
             StructField("audit_lag_minutes", DoubleType(), True),
+            StructField("actual_ticker", StringType(), True),
+            StructField("allocation_delta_bp", DoubleType(), True),
+            StructField("actual_cash_pct", DoubleType(), True),
+            StructField("dashboard_data_freshness_minutes", DoubleType(), True),
+            StructField("last_skip_reason", StringType(), True),
+            StructField("last_error_reason", StringType(), True),
+            StructField("last_skip_count_24h", IntegerType(), True),
+            StructField("last_error_count_24h", IntegerType(), True),
             StructField("execution_mode", StringType(), True),
             StructField("vix_source_date", StringType(), True),
             StructField("model_version", StringType(), True),
@@ -819,6 +997,7 @@ def build_output_schema() -> StructType:
 
 def main() -> None:
     execution_mode = resolve_execution_mode()
+    dashboard_ts = datetime.now(timezone.utc).replace(tzinfo=None)
 
     signal_row = load_latest_signal()
     silver_row = load_latest_silver()
@@ -861,13 +1040,47 @@ def main() -> None:
         regime_start_ts=current_regime_start_ts,
     )
 
+    trade_ts = safe_ts(trade_row, "trade_ts") if trade_row else None
+    target_ticker = maybe_str(trade_row["target_ticker"]) if trade_row else None
+    account_cash = maybe_float(trade_row["account_cash"]) if trade_row else None
+    actual_ticker, actual_cash_pct, allocation_delta_bp = parse_actual_allocation_state(
+        positions_payload=trade_row["positions_json"] if trade_row else None,
+        target_ticker=target_ticker,
+        account_equity=latest_equity,
+        account_cash=account_cash,
+    )
+
+    equity_vs_cash_ratio = None
+    if latest_equity is not None and account_cash not in (None, 0.0):
+        equity_vs_cash_ratio = latest_equity / account_cash
+
+    execution_actions_health = load_execution_action_health(execution_mode)
+    most_recent_payload_ts = most_recent_timestamp(signal_ts, trade_ts, latest_audit_ts)
+    dashboard_data_freshness_minutes = None
+    if most_recent_payload_ts is not None:
+        try:
+            dashboard_data_freshness_minutes = (
+                (dashboard_ts - most_recent_payload_ts).total_seconds() / 60.0
+            )
+        except Exception:
+            dashboard_data_freshness_minutes = None
+
+    regime_age_hours = None
+    regime_elapsed_days = None
+    if current_regime_start_ts is not None:
+        try:
+            regime_age_hours = (dashboard_ts - current_regime_start_ts).total_seconds() / 3600.0
+            regime_elapsed_days = regime_age_hours / 24.0
+        except Exception:
+            regime_age_hours = None
+            regime_elapsed_days = None
+
     macro_last_release = None
     if table_exists(MACRO_TABLE):
         macro_last = scalar_row(f"SELECT MAX(timestamp) AS macro_last_release_ts FROM {MACRO_TABLE}")
         if macro_last:
             macro_last_release = macro_last["macro_last_release_ts"]
 
-    dashboard_ts = datetime.now(timezone.utc).replace(tzinfo=None)
     price_ts = None
     if table_exists(MARKET_TABLE):
         price_ts_row = scalar_row(f"SELECT MAX(timestamp) AS max_ts FROM {MARKET_TABLE}")
@@ -878,7 +1091,7 @@ def main() -> None:
         "feed_ts": dashboard_ts,
         "dashboard_ts": dashboard_ts,
         "signal_ts": signal_ts,
-        "trade_ts": safe_ts(trade_row, "trade_ts") if trade_row else None,
+        "trade_ts": trade_ts,
         "audit_ts": latest_audit_ts,
         "current_regime_start_ts": current_regime_start_ts,
         "price_ts": price_ts,
@@ -920,6 +1133,9 @@ def main() -> None:
         "alpha_pct": alpha_pct,
         "drawdown_pct": drawdown_pct,
         "regime_drawdown_pct": regime_drawdown_pct,
+        "regime_age_hours": maybe_float(regime_age_hours),
+        "regime_elapsed_days": maybe_float(regime_elapsed_days),
+        "equity_vs_cash_ratio": maybe_float(equity_vs_cash_ratio),
         "total_cycles": portfolio.get("total_cycles"),
         "total_switches": portfolio.get("total_switches"),
         "peak_equity": portfolio.get("peak_equity"),
@@ -931,6 +1147,20 @@ def main() -> None:
         "audit_rows_last_24h": audit_health["audit_rows_last_24h"],
         "latest_audit_ts": audit_health["latest_audit_ts"],
         "audit_lag_minutes": audit_health["audit_lag_minutes"],
+        "actual_ticker": actual_ticker,
+        "allocation_delta_bp": allocation_delta_bp,
+        "actual_cash_pct": maybe_float(actual_cash_pct),
+        "dashboard_data_freshness_minutes": maybe_float(dashboard_data_freshness_minutes),
+        "last_skip_reason": parse_last_action_reason(
+            trade_row["orders_placed"] if trade_row else None,
+            "skip",
+        ),
+        "last_error_reason": parse_last_action_reason(
+            trade_row["orders_placed"] if trade_row else None,
+            "error",
+        ),
+        "last_skip_count_24h": execution_actions_health["last_skip_count_24h"],
+        "last_error_count_24h": execution_actions_health["last_error_count_24h"],
         "execution_mode": execution_mode,
         "vix_source_date": load_vix_source_date(),
         "model_version": get_model_version(maybe_str(signal_row["model_version"]) or "bootstrap_live_model"),
