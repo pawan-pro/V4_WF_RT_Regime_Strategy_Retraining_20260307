@@ -1,9 +1,6 @@
 # Databricks notebook source
 # RT_10: Saxo dashboard feed (canonical live producer)
 
-# MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config
-# MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
-
 from datetime import datetime, timezone, timedelta
 import json
 import random
@@ -22,7 +19,9 @@ from pyspark.sql.types import (
 )
 
 # ---------------------------------------------------------------------------
-# Fallbacks for helper modules if `%run` imports are unavailable in this runtime.
+# Helper loading intentionally self-sufficient.
+# `%run` paths can be context-sensitive in Databricks and can emit warnings,
+# so we keep resilient local fallbacks as the canonical behavior in this notebook.
 # ---------------------------------------------------------------------------
 if "load_runtime_instrument_config" not in globals():
     DEFAULT_CATALOG = "pawan_quant_research_1"
