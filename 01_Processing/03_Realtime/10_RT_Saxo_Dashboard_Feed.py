@@ -4,7 +4,7 @@
 # MAGIC %run ../../06_Databricks/02_Scripts/02_Runtime_Instrument_Config
 # MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 import random
 import time
@@ -203,6 +203,8 @@ MARKET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_market_1h"
 MACRO_TABLE = f"{CATALOG}.{SCHEMA}.bronze_bt_macro_events"
 MODEL_REGISTRY_TABLE = f"{CATALOG}.{SCHEMA}.model_registry_current"
 TARGET_TABLE = f"{CATALOG}.{SCHEMA}.gold_rt_saxo_dashboard_feed"
+DASHBOARD_HEALTH_ROLLUP_TABLE = f"{CATALOG}.{SCHEMA}.gold_rt_saxo_dashboard_health_rollup"
+DASHBOARD_PERFORMANCE_ROLLUP_TABLE = f"{CATALOG}.{SCHEMA}.gold_rt_saxo_dashboard_performance_rollup"
 
 runtime_config = load_runtime_instrument_config(spark, CATALOG, SCHEMA)
 PRIMARY_SYMBOL = runtime_config["primary_symbol"]
@@ -333,6 +335,44 @@ def parse_last_action_reason(orders_payload: Any, action: str) -> Optional[str]:
         )
         if reason is not None:
             return reason
+    return None
+
+
+def parse_last_execution_action(orders_payload: Any) -> Optional[str]:
+    """Return the latest parsed execution action from an order payload."""
+    data = extract_order_events(orders_payload)
+    if not data:
+        return None
+    for event in reversed(data):
+        if not isinstance(event, dict):
+            continue
+        action = normalize_action_name(event.get("action"))
+        if action is not None:
+            return action
+    return None
+
+
+def is_rate_limit_reason(message: Optional[str]) -> bool:
+    """Return whether text indicates a rate-limit style execution error."""
+    text = maybe_str(message)
+    if text is None:
+        return False
+    lowered = text.lower()
+    return (
+        "rate limit" in lowered
+        or "ratelimit" in lowered
+        or "too many requests" in lowered
+        or "429" in lowered
+        or "throttl" in lowered
+    )
+
+
+def sql_timestamp(ts: Optional[datetime]) -> Optional[str]:
+    """Format timestamp for SQL literals."""
+    if ts is None:
+        return None
+    if isinstance(ts, datetime):
+        return ts.strftime("%Y-%m-%d %H:%M:%S")
     return None
 
 
@@ -555,6 +595,45 @@ def ensure_target_table(schema: StructType) -> None:
     for field in schema.fields:
         if field.name not in current:
             spark.sql(f"ALTER TABLE {TARGET_TABLE} ADD COLUMN {field.name} {field.dataType.simpleString()}")
+
+
+def write_dataframe_with_retry(
+    dataframe,
+    table_name: str,
+    options: Optional[dict] = None,
+    operation_name: str = "write dataframe",
+    mode: str = "overwrite",
+    **retry_kwargs,
+) -> None:
+    """Write a DataFrame with retry semantics, supporting overwrite and append modes."""
+    if "overwrite_dataframe_with_retry" in globals() and mode == "overwrite":
+        overwrite_dataframe_with_retry(
+            dataframe,
+            table_name,
+            options=options or {},
+            operation_name=operation_name,
+            **retry_kwargs,
+        )
+        return
+
+    options = options or {}
+    write_mode = mode if mode in {"overwrite", "append", "ignore", "error", "errorifexists"} else "overwrite"
+
+    def write_once():
+        writer = dataframe.write.format("delta").mode(write_mode)
+        for option_key, option_value in options.items():
+            writer = writer.option(option_key, option_value)
+        writer.saveAsTable(table_name)
+
+    if "run_with_retry" in globals():
+        run_with_retry(
+            operation_name=operation_name,
+            operation=write_once,
+            **retry_kwargs,
+        )
+        return
+
+    write_once()
 
 
 def load_latest_signal() -> Row:
@@ -880,7 +959,11 @@ def load_audit_health(execution_mode: str) -> dict[str, Optional[float] | Option
 def load_execution_action_health(execution_mode: str) -> dict[str, int]:
     """Count skip/error actions from recent trade rows using same parser rules as reasons."""
     if not table_exists(TRADE_LOG):
-        return {"last_skip_count_24h": 0, "last_error_count_24h": 0}
+        return {
+            "last_skip_count_24h": 0,
+            "last_error_count_24h": 0,
+            "last_rate_limit_count_24h": 0,
+        }
 
     rows = (
         spark.sql(
@@ -895,10 +978,15 @@ def load_execution_action_health(execution_mode: str) -> dict[str, int]:
     )
 
     if not rows:
-        return {"last_skip_count_24h": 0, "last_error_count_24h": 0}
+        return {
+            "last_skip_count_24h": 0,
+            "last_error_count_24h": 0,
+            "last_rate_limit_count_24h": 0,
+        }
 
     skip_count = 0
     error_count = 0
+    rate_limit_count = 0
     for row in rows:
         for event in extract_order_events(row["orders_placed"]):
             action = normalize_action_name(event.get("action"))
@@ -906,11 +994,205 @@ def load_execution_action_health(execution_mode: str) -> dict[str, int]:
                 skip_count += 1
             elif action == "error":
                 error_count += 1
+                if is_rate_limit_reason(maybe_str(event.get("message"))):
+                    rate_limit_count += 1
 
     return {
         "last_skip_count_24h": skip_count,
         "last_error_count_24h": error_count,
+        "last_rate_limit_count_24h": rate_limit_count,
     }
+
+
+def load_relative_benchmark_return(
+    execution_mode: str,
+    latest_trade_ts: Optional[datetime],
+    latest_equity: Optional[float],
+    latest_spy: Optional[float],
+    lookback: timedelta,
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    if latest_trade_ts is None or latest_equity in (None, 0.0) or latest_spy in (None, 0.0):
+        return None, None, None
+
+    anchor_ts = latest_trade_ts - lookback
+    anchor_literal = sql_timestamp(anchor_ts)
+    if anchor_literal is None:
+        return None, None, None
+
+    anchor_row = scalar_row(
+        f"""
+        SELECT account_equity AS anchor_equity, spy_close AS anchor_spy
+        FROM {TRADE_LOG}
+        WHERE execution_mode = '{execution_mode}'
+          AND trade_ts <= TIMESTAMP('{anchor_literal}')
+          AND account_equity IS NOT NULL
+          AND spy_close IS NOT NULL
+        ORDER BY trade_ts DESC
+        LIMIT 1
+        """
+    )
+    if not anchor_row:
+        return None, None, None
+
+    anchor_equity = maybe_float(anchor_row["anchor_equity"])
+    anchor_spy = maybe_float(anchor_row["anchor_spy"])
+    if anchor_equity in (None, 0.0) or anchor_spy in (None, 0.0):
+        return None, None, None
+
+    strategy_return = latest_equity / anchor_equity - 1.0
+    benchmark_return = latest_spy / anchor_spy - 1.0
+    return strategy_return, benchmark_return, strategy_return - benchmark_return
+
+
+def load_regime_transition_count_24h(execution_mode: str) -> int:
+    if not table_exists(AUDIT_LOG):
+        return 0
+
+    rows = spark.sql(
+        f"""
+        WITH transitions AS (
+            SELECT
+                regime_int,
+                LAG(regime_int) OVER (ORDER BY audit_ts) AS prev_regime_int
+            FROM {AUDIT_LOG}
+            WHERE execution_mode = '{execution_mode}'
+              AND audit_ts >= TIMESTAMPADD(HOUR, -24, CURRENT_TIMESTAMP())
+        )
+        SELECT COUNT(*) AS transition_count
+        FROM transitions
+        WHERE prev_regime_int IS NOT NULL
+          AND regime_int != prev_regime_int
+        """
+    ).collect()
+
+    if not rows:
+        return 0
+    return maybe_int(rows[0]["transition_count"]) or 0
+
+
+def build_health_rollup_schema() -> StructType:
+    return StructType(
+        [
+            StructField("rollup_ts", TimestampType(), True),
+            StructField("execution_mode", StringType(), True),
+            StructField("feed_ts", TimestampType(), True),
+            StructField("dashboard_ts", TimestampType(), True),
+            StructField("audit_rows_total", IntegerType(), True),
+            StructField("audit_rows_last_24h", IntegerType(), True),
+            StructField("latest_audit_ts", TimestampType(), True),
+            StructField("audit_lag_minutes", DoubleType(), True),
+            StructField("trade_ts", TimestampType(), True),
+            StructField("last_execution_action", StringType(), True),
+            StructField("last_skip_reason", StringType(), True),
+            StructField("last_error_reason", StringType(), True),
+            StructField("last_skip_count_24h", IntegerType(), True),
+            StructField("last_error_count_24h", IntegerType(), True),
+            StructField("last_rate_limit_count_24h", IntegerType(), True),
+            StructField("regime_transition_count_24h", IntegerType(), True),
+            StructField("dashboard_data_freshness_minutes", DoubleType(), True),
+            StructField("source", StringType(), True),
+            StructField("ingestion_ts", TimestampType(), True),
+        ]
+    )
+
+
+def build_performance_rollup_schema() -> StructType:
+    return StructType(
+        [
+            StructField("rollup_ts", TimestampType(), True),
+            StructField("execution_mode", StringType(), True),
+            StructField("feed_ts", TimestampType(), True),
+            StructField("dashboard_ts", TimestampType(), True),
+            StructField("strategy_return_1h", DoubleType(), True),
+            StructField("benchmark_return_1h", DoubleType(), True),
+            StructField("alpha_1h", DoubleType(), True),
+            StructField("strategy_return_1d", DoubleType(), True),
+            StructField("benchmark_return_1d", DoubleType(), True),
+            StructField("alpha_1d", DoubleType(), True),
+            StructField("regime_return_pct", DoubleType(), True),
+            StructField("alpha_pct", DoubleType(), True),
+            StructField("total_return_pct", DoubleType(), True),
+            StructField("drawdown_pct", DoubleType(), True),
+            StructField("regime_drawdown_pct", DoubleType(), True),
+            StructField("account_equity", DoubleType(), True),
+            StructField("account_cash", DoubleType(), True),
+            StructField("source", StringType(), True),
+            StructField("ingestion_ts", TimestampType(), True),
+        ]
+    )
+
+
+def ensure_rollup_table(table_name: str, create_ddl: str, schema: StructType) -> None:
+    spark.sql(create_ddl)
+    current = existing_columns(table_name)
+    for field in schema.fields:
+        if field.name not in current:
+            spark.sql(f"ALTER TABLE {table_name} ADD COLUMN {field.name} {field.dataType.simpleString()}")
+
+
+def ensure_rollup_tables() -> tuple[StructType, StructType]:
+    health_schema = build_health_rollup_schema()
+    performance_schema = build_performance_rollup_schema()
+
+    ensure_rollup_table(
+        DASHBOARD_HEALTH_ROLLUP_TABLE,
+        f"""
+        CREATE TABLE IF NOT EXISTS {DASHBOARD_HEALTH_ROLLUP_TABLE} (
+            rollup_ts TIMESTAMP,
+            execution_mode STRING,
+            feed_ts TIMESTAMP,
+            dashboard_ts TIMESTAMP,
+            audit_rows_total INT,
+            audit_rows_last_24h INT,
+            latest_audit_ts TIMESTAMP,
+            audit_lag_minutes DOUBLE,
+            trade_ts TIMESTAMP,
+            last_execution_action STRING,
+            last_skip_reason STRING,
+            last_error_reason STRING,
+            last_skip_count_24h INT,
+            last_error_count_24h INT,
+            last_rate_limit_count_24h INT,
+            regime_transition_count_24h INT,
+            dashboard_data_freshness_minutes DOUBLE,
+            source STRING,
+            ingestion_ts TIMESTAMP
+        )
+        USING DELTA
+        """
+    , health_schema
+    )
+
+    ensure_rollup_table(
+        DASHBOARD_PERFORMANCE_ROLLUP_TABLE,
+        f"""
+        CREATE TABLE IF NOT EXISTS {DASHBOARD_PERFORMANCE_ROLLUP_TABLE} (
+            rollup_ts TIMESTAMP,
+            execution_mode STRING,
+            feed_ts TIMESTAMP,
+            dashboard_ts TIMESTAMP,
+            strategy_return_1h DOUBLE,
+            benchmark_return_1h DOUBLE,
+            alpha_1h DOUBLE,
+            strategy_return_1d DOUBLE,
+            benchmark_return_1d DOUBLE,
+            alpha_1d DOUBLE,
+            regime_return_pct DOUBLE,
+            alpha_pct DOUBLE,
+            total_return_pct DOUBLE,
+            drawdown_pct DOUBLE,
+            regime_drawdown_pct DOUBLE,
+            account_equity DOUBLE,
+            account_cash DOUBLE,
+            source STRING,
+            ingestion_ts TIMESTAMP
+        )
+        USING DELTA
+        """
+    , performance_schema
+    )
+    return health_schema, performance_schema
+
 
 
 def load_vix_source_date() -> Optional[Any]:
@@ -1002,8 +1284,10 @@ def build_output_schema() -> StructType:
             StructField("dashboard_data_freshness_minutes", DoubleType(), True),
             StructField("last_skip_reason", StringType(), True),
             StructField("last_error_reason", StringType(), True),
+            StructField("last_execution_action", StringType(), True),
             StructField("last_skip_count_24h", IntegerType(), True),
             StructField("last_error_count_24h", IntegerType(), True),
+            StructField("last_rate_limit_count_24h", IntegerType(), True),
             StructField("execution_mode", StringType(), True),
             StructField("vix_source_date", StringType(), True),
             StructField("model_version", StringType(), True),
@@ -1073,6 +1357,31 @@ def main() -> None:
         equity_vs_cash_ratio = latest_equity / account_cash
 
     execution_actions_health = load_execution_action_health(execution_mode)
+    last_skip_reason = parse_last_action_reason(
+        trade_row["orders_placed"] if trade_row else None,
+        "skip",
+    )
+    last_error_reason = parse_last_action_reason(
+        trade_row["orders_placed"] if trade_row else None,
+        "error",
+    )
+    latest_spy = maybe_float(trade_row["spy_close"]) if trade_row else None
+    strategy_return_1h, benchmark_return_1h, alpha_1h = load_relative_benchmark_return(
+        execution_mode=execution_mode,
+        latest_trade_ts=safe_ts(trade_row, "trade_ts"),
+        latest_equity=latest_equity,
+        latest_spy=latest_spy,
+        lookback=timedelta(hours=1),
+    )
+    strategy_return_1d, benchmark_return_1d, alpha_1d = load_relative_benchmark_return(
+        execution_mode=execution_mode,
+        latest_trade_ts=safe_ts(trade_row, "trade_ts"),
+        latest_equity=latest_equity,
+        latest_spy=latest_spy,
+        lookback=timedelta(days=1),
+    )
+    regime_transition_count_24h = load_regime_transition_count_24h(execution_mode)
+    last_execution_action = parse_last_execution_action(trade_row["orders_placed"] if trade_row else None)
     most_recent_payload_ts = most_recent_timestamp(signal_ts, trade_ts, latest_audit_ts)
     dashboard_data_freshness_minutes = None
     if most_recent_payload_ts is not None:
@@ -1169,16 +1478,12 @@ def main() -> None:
         "allocation_delta_bp": allocation_delta_bp,
         "actual_cash_pct": maybe_float(actual_cash_pct),
         "dashboard_data_freshness_minutes": maybe_float(dashboard_data_freshness_minutes),
-        "last_skip_reason": parse_last_action_reason(
-            trade_row["orders_placed"] if trade_row else None,
-            "skip",
-        ),
-        "last_error_reason": parse_last_action_reason(
-            trade_row["orders_placed"] if trade_row else None,
-            "error",
-        ),
+        "last_skip_reason": last_skip_reason,
+        "last_error_reason": last_error_reason,
+        "last_execution_action": last_execution_action,
         "last_skip_count_24h": execution_actions_health["last_skip_count_24h"],
         "last_error_count_24h": execution_actions_health["last_error_count_24h"],
+        "last_rate_limit_count_24h": execution_actions_health["last_rate_limit_count_24h"],
         "execution_mode": execution_mode,
         "vix_source_date": load_vix_source_date(),
         "model_version": get_model_version(maybe_str(signal_row["model_version"]) or "bootstrap_live_model"),
@@ -1190,11 +1495,76 @@ def main() -> None:
     ensure_target_table(output_schema)
 
     output_df = spark.createDataFrame([dashboard_row], schema=output_schema)
-    overwrite_dataframe_with_retry(
+    write_dataframe_with_retry(
         output_df,
         TARGET_TABLE,
         options={"overwriteSchema": "true"},
         operation_name=f"overwrite Saxo dashboard feed table {TARGET_TABLE}",
+    )
+
+    health_schema, performance_schema = ensure_rollup_tables()
+    write_dataframe_with_retry(
+        spark.createDataFrame(
+            [
+                {
+                    "rollup_ts": dashboard_ts,
+                    "execution_mode": execution_mode,
+                    "feed_ts": dashboard_ts,
+                    "dashboard_ts": dashboard_ts,
+                    "audit_rows_total": audit_health["audit_rows_total"],
+                    "audit_rows_last_24h": audit_health["audit_rows_last_24h"],
+                    "latest_audit_ts": audit_health["latest_audit_ts"],
+                    "audit_lag_minutes": audit_health["audit_lag_minutes"],
+                    "trade_ts": trade_ts,
+                    "last_execution_action": last_execution_action,
+                    "last_skip_reason": last_skip_reason,
+                    "last_error_reason": last_error_reason,
+                    "last_skip_count_24h": execution_actions_health["last_skip_count_24h"],
+                    "last_error_count_24h": execution_actions_health["last_error_count_24h"],
+                    "last_rate_limit_count_24h": execution_actions_health["last_rate_limit_count_24h"],
+                    "regime_transition_count_24h": regime_transition_count_24h,
+                    "dashboard_data_freshness_minutes": dashboard_data_freshness_minutes,
+                    "source": "rt_saxo_dashboard_feed_v4",
+                    "ingestion_ts": dashboard_ts,
+                }
+            ],
+            schema=health_schema,
+        ),
+        DASHBOARD_HEALTH_ROLLUP_TABLE,
+        operation_name=f"append Saxo dashboard health rollup table {DASHBOARD_HEALTH_ROLLUP_TABLE}",
+        mode="append",
+    )
+
+    write_dataframe_with_retry(
+        spark.createDataFrame(
+            [
+                {
+                    "rollup_ts": dashboard_ts,
+                    "execution_mode": execution_mode,
+                    "feed_ts": dashboard_ts,
+                    "dashboard_ts": dashboard_ts,
+                    "strategy_return_1h": strategy_return_1h,
+                    "benchmark_return_1h": benchmark_return_1h,
+                    "alpha_1h": alpha_1h,
+                    "strategy_return_1d": strategy_return_1d,
+                    "benchmark_return_1d": benchmark_return_1d,
+                    "alpha_1d": alpha_1d,
+                    "regime_return_pct": regime_return_pct,
+                    "alpha_pct": alpha_pct,
+                    "total_return_pct": total_return_pct,
+                    "drawdown_pct": drawdown_pct,
+                    "regime_drawdown_pct": regime_drawdown_pct,
+                    "account_equity": latest_equity,
+                    "account_cash": account_cash,
+                    "source": "rt_saxo_dashboard_feed_v4",
+                    "ingestion_ts": dashboard_ts,
+                }
+            ],
+            schema=performance_schema,
+        ),
+        DASHBOARD_PERFORMANCE_ROLLUP_TABLE,
+        operation_name=f"append Saxo dashboard performance rollup table {DASHBOARD_PERFORMANCE_ROLLUP_TABLE}",
+        mode="append",
     )
 
     print(f"Saxo dashboard feed written to {TARGET_TABLE}")
