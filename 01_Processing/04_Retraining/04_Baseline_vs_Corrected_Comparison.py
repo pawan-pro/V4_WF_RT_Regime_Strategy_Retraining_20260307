@@ -225,7 +225,7 @@ corrected_model = load_model(corrected_model_path)
 repair_window_pdf = (
     spark.sql(
         f"""
-        SELECT timestamp, regime, {", ".join(FEATURES)}
+        SELECT timestamp, {", ".join(FEATURES)}
         FROM {SILVER_TABLE}
         WHERE timestamp BETWEEN timestamp('{REPAIR_WINDOW_START.strftime("%Y-%m-%d %H:%M:%S")}')
           AND timestamp('{REPAIR_WINDOW_END.strftime("%Y-%m-%d %H:%M:%S")}')
@@ -330,7 +330,6 @@ if not repair_model_compare.empty:
             [
                 "scope",
                 "timestamp",
-                "regime",
                 "baseline_predicted_regime",
                 "baseline_regime_name",
                 "baseline_prob_expansion",
