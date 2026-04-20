@@ -622,6 +622,7 @@ elif mode == "validate":
         "repo_head_after": repo_head_after,
         "code_files_changed": [
             "01_Processing/01_Ingestion/02_BT_FinnHub_Macro_Historical.py",
+            "01_Processing/01_Ingestion/repair/02_BT_Macro_Bronze_Full_Historical_Rebuild_2016_2026.py",
             "01_Processing/04_Retraining/19_Improved_ALFRED_Production_Release.py",
         ],
         "production_tables": [
