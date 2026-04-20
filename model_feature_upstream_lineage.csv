@@ -1,0 +1,15 @@
+feature_name,immediate_source_table,immediate_source_fields,raw_source_family,raw_source_table_or_file,used_in_training,used_in_production,notes
+CPIAUCSL_z,silver_bt_master_grid_1h / silver_rt_1h,CPIAUCSL_z,macro,bronze_bt_macro_events.actual (indicator_id='CPIAUCSL'); optional bronze_rt_macro_events_live.observed_value in RT,yes,yes,RT path may recompute z-score from live CPI value; otherwise carries historical silver forward.
+PCEPI_z,silver_bt_master_grid_1h / silver_rt_1h,PCEPI_z,macro,bronze_bt_macro_events.actual (indicator_id='PCEPI'),yes,yes,RT path carries latest historical silver value.
+PCE_z,silver_bt_master_grid_1h / silver_rt_1h,PCE_z,macro,bronze_bt_macro_events.actual (indicator_id='PCE'),yes,yes,RT path carries latest historical silver value.
+PAYEMS_z,silver_bt_master_grid_1h / silver_rt_1h,PAYEMS_z,macro,bronze_bt_macro_events.actual (indicator_id='PAYEMS'),yes,yes,RT path carries latest historical silver value.
+UNRATE_z,silver_bt_master_grid_1h / silver_rt_1h,UNRATE_z,macro,bronze_bt_macro_events.actual (indicator_id='UNRATE'),yes,yes,RT path carries latest historical silver value.
+GDPC1_z,silver_bt_master_grid_1h / silver_rt_1h,GDPC1_z,macro,bronze_bt_macro_events.actual (indicator_id='GDPC1'),yes,yes,RT path carries latest historical silver value.
+INDPRO_z,silver_bt_master_grid_1h / silver_rt_1h,INDPRO_z,macro,bronze_bt_macro_events.actual (indicator_id='INDPRO'),yes,yes,RT path carries latest historical silver value.
+UMCSENT_z,silver_bt_master_grid_1h / silver_rt_1h,UMCSENT_z,macro,bronze_bt_macro_events.actual (indicator_id='UMCSENT'); optional bronze_rt_macro_events_live.observed_value when final/validated,yes,yes,RT path allows final-only live override.
+VIXCLS_z,silver_bt_master_grid_1h / silver_rt_1h,VIXCLS_z,VIX,bronze_bt_vix_1h.close; RT uses bronze_rt_vix_1d.close where series=VIXCLS,yes,yes,RT z-score is recomputed against historical VIX context.
+vix3m_z,silver_bt_master_grid_1h / silver_rt_1h,vix3m_z,VIX,bronze_bt_vix3m_1h.close|vix3m; RT uses bronze_rt_vix_1d.close where series=vix3m,yes,yes,RT z-score is recomputed against historical VIX3M context.
+VIX_Inversion_Z,silver_bt_master_grid_1h / silver_rt_1h,VIX_Inversion_Z,derived,Derived from VIXCLS_z and vix3m_z,yes,yes,No separate raw feed; computed after both VIX z-scores exist.
+Price_Mom_24H,silver_bt_master_grid_1h / silver_rt_1h,Price_Mom_24H,market / derived,Training uses silver_bt_master_grid_1h.SPY_close; RT uses bronze_rt_market_1h.close plus bronze_bt_market_1h history,yes,yes,Derived from SPY price momentum over the last 24 hours.
+CPI_Event_Active,silver_bt_master_grid_1h / silver_rt_1h,CPI_Event_Active,derived macro event flag,Derived from bronze_bt_macro_events CPI levels -> CPI shock pulse window,yes,yes,RT carries the historical silver event flag forward rather than rebuilding it from live schedule rows.
+NFP_Event_Active,silver_bt_master_grid_1h / silver_rt_1h,NFP_Event_Active,derived macro event flag,Derived from bronze_bt_macro_events PAYEMS levels -> NFP shock pulse window,yes,yes,RT carries the historical silver event flag forward.
