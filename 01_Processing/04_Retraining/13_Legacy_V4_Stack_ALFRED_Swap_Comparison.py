@@ -495,8 +495,8 @@ def build_macro_variant(haystack_df, selection_mode, target_table, variant_dir):
     )
     summary_pdf.to_csv(f"{variant_dir}/macro_indicator_summary.csv", index=False)
     return {
-        "table": table_name,
-        "table_stats": table_row_range(table_name),
+        "table": target_table,
+        "table_stats": table_row_range(target_table),
         "audit_path": audit_path,
         "summary_path": f"{variant_dir}/macro_indicator_summary.csv",
     }
