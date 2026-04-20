@@ -667,6 +667,7 @@ legacy_default_silver_table = LEGACY_DEFAULT_SILVER_TABLE_DEFAULT
 repaired_bronze_table = REPAIRED_BRONZE_TABLE_DEFAULT
 repaired_pandas_silver_table = REPAIRED_PANDAS_SILVER_TABLE_DEFAULT
 fixed_spark_silver_table = FIXED_SPARK_SILVER_TABLE_DEFAULT
+candidate_silver_table = REPAIRED_PANDAS_SILVER_TABLE_DEFAULT
 reference_signal_table = REFERENCE_SIGNAL_TABLE_DEFAULT
 fixed_signal_table = FIXED_SIGNAL_TABLE_DEFAULT
 legacy_label_path = LEGACY_LABEL_PATH_DEFAULT
@@ -687,6 +688,7 @@ if "dbutils" in globals():
     dbutils.widgets.text("repaired_bronze_table", REPAIRED_BRONZE_TABLE_DEFAULT)
     dbutils.widgets.text("repaired_pandas_silver_table", REPAIRED_PANDAS_SILVER_TABLE_DEFAULT)
     dbutils.widgets.text("fixed_spark_silver_table", FIXED_SPARK_SILVER_TABLE_DEFAULT)
+    dbutils.widgets.text("candidate_silver_table", REPAIRED_PANDAS_SILVER_TABLE_DEFAULT)
     dbutils.widgets.text("reference_signal_table", REFERENCE_SIGNAL_TABLE_DEFAULT)
     dbutils.widgets.text("fixed_signal_table", FIXED_SIGNAL_TABLE_DEFAULT)
     dbutils.widgets.text("legacy_label_path", LEGACY_LABEL_PATH_DEFAULT)
@@ -713,6 +715,9 @@ if "dbutils" in globals():
     )
     fixed_spark_silver_table = (
         dbutils.widgets.get("fixed_spark_silver_table").strip() or FIXED_SPARK_SILVER_TABLE_DEFAULT
+    )
+    candidate_silver_table = (
+        dbutils.widgets.get("candidate_silver_table").strip() or REPAIRED_PANDAS_SILVER_TABLE_DEFAULT
     )
     reference_signal_table = (
         dbutils.widgets.get("reference_signal_table").strip() or REFERENCE_SIGNAL_TABLE_DEFAULT
@@ -761,18 +766,13 @@ label_lineage_audit["label_mismatch"] = (
     != label_lineage_audit["regenerated_label_regime"]
 )
 
-build_legacy_silver_spark(repaired_bronze_table, fixed_spark_silver_table)
-
 reference_silver_pdf = load_feature_frame(legacy_default_silver_table)
 pandas_silver_pdf = load_feature_frame(repaired_pandas_silver_table)
-spark_silver_pdf = load_feature_frame(fixed_spark_silver_table)
 
-silver_parity_pdf = pd.concat(
-    [
-        compare_feature_frames(pandas_silver_pdf, reference_silver_pdf, "repaired_pandas"),
-        compare_feature_frames(spark_silver_pdf, reference_silver_pdf, "fixed_spark"),
-    ],
-    ignore_index=True,
+silver_parity_pdf = compare_feature_frames(
+    pandas_silver_pdf,
+    reference_silver_pdf,
+    "repaired_pandas",
 )
 silver_parity_path = f"{comparison_dir}/silver_parity_audit.csv"
 silver_parity_pdf.to_csv(silver_parity_path, index=False)
@@ -783,7 +783,7 @@ prior_signals_pdf = load_label_frame(prior_signal_path, "predicted_regime").rena
 reference_signals_pdf = load_reference_signals()
 
 fixed_signals_pdf, fixed_backtest_pdf, fixed_metrics, monthly_validation_pdf = run_walkforward_variant(
-    fixed_spark_silver_table,
+    candidate_silver_table,
     legacy_label_path,
     fixed_signal_table,
     baseline_dir,
@@ -987,7 +987,7 @@ root_cause_lines = [
     "",
     f"- `14_Legacy_Macro_Series_Recovery.py` used regenerated labels from `{prior_regenerated_label_path}` instead of the authoritative legacy label file `{legacy_label_path}`.",
     f"- Regenerated labels match the authoritative legacy label file at only `{float((label_lineage_audit['legacy_label_regime'] == label_lineage_audit['regenerated_label_regime']).mean()):.6f}` across `{len(label_lineage_audit)}` overlapping timestamps.",
-    f"- The prior repaired baseline also used a pandas silver reconstruction, while the old legacy silver notebook is Spark-native. The new workflow rebuilt silver with the exact Spark notebook logic into `{fixed_spark_silver_table}`.",
+    f"- The repaired legacy silver still carries residual feature drift versus the authoritative default silver table; that drift is measured in `{silver_parity_path}`.",
     "",
     "## Boundary / Timing Audit",
     "",
@@ -1000,7 +1000,7 @@ root_cause_lines = [
     "## Smallest Safe Fixes Applied",
     "",
     "- Switched walk-forward training labels to the authoritative legacy label file.",
-    "- Switched silver reconstruction from the prior pandas approximation to the exact Spark legacy silver logic.",
+    "- Kept the repaired comparison-safe legacy silver table and changed only the walk-forward label lineage / export alignment path.",
 ]
 root_cause_path = f"{comparison_dir}/mismatch_root_cause.md"
 write_text(root_cause_path, "\n".join(root_cause_lines) + "\n")
@@ -1011,11 +1011,11 @@ recommendation_payload = {
     "ready_for_alfred_only_swap_comparison": ready_for_swap,
     "root_causes": [
         "label_lineage_mismatch",
-        "silver_reconstruction_semantics_mismatch",
+        "residual_silver_feature_drift",
     ],
     "fixes_applied": [
         "use_authoritative_legacy_label_file",
-        "use_exact_spark_legacy_silver_build",
+        "preserve_existing_repaired_legacy_silver_and_align_walkforward_labels",
     ],
 }
 recommendation_path = f"{comparison_dir}/repaired_baseline_recommendation.json"
@@ -1060,7 +1060,7 @@ run_metadata = {
         "legacy_default_silver_table": legacy_default_silver_table,
         "repaired_bronze_table": repaired_bronze_table,
         "repaired_pandas_silver_table": repaired_pandas_silver_table,
-        "fixed_spark_silver_table": table_row_range(fixed_spark_silver_table),
+        "candidate_silver_table": table_row_range(candidate_silver_table),
         "reference_signal_table": table_row_range(reference_signal_table),
         "fixed_signal_table": table_row_range(fixed_signal_table),
     },
