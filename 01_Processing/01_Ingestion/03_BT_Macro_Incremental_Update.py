@@ -118,10 +118,23 @@ def get_alfred_first_release(series_id, release_date):
     vintages = load_alfred_releases(series_id)
     if vintages.empty:
         return None
-    match = vintages[vintages["realtime_start"] == pd.to_datetime(release_date).date()]
-    if not match.empty:
+    release_dt = pd.to_datetime(release_date).date()
+    match = vintages[pd.to_datetime(vintages["realtime_start"]).dt.date == release_dt]
+    if match.empty:
+        return None
+
+    observation_col = "observation_date" if "observation_date" in match.columns else "date"
+    if observation_col not in match.columns:
         return float(match.iloc[0]["value"])
-    return None
+
+    match = match.copy()
+    match["observation_date"] = pd.to_datetime(match[observation_col], errors="coerce")
+    match = match.dropna(subset=["observation_date"])
+    if match.empty:
+        return None
+
+    latest_index = match["observation_date"].idxmax()
+    return float(match.loc[latest_index]["value"])
 
 def discover_release_dates(series_id, indicator_events):
     release_dates = {

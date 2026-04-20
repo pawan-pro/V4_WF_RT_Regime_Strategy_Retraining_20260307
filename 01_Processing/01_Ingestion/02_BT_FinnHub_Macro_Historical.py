@@ -89,15 +89,32 @@ TYPICAL_TIMES = {
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Block 3: timing Pattern Application (Claude Analysis Logic)
+# MAGIC Block 3: timing Pattern Application (Historical bootstrap with corrected ALFRED selection)
 
 # COMMAND ----------
 
 def get_alfred_first_release(series_id, release_date):
     try:
-        vintages = fred.get_series_all_releases(series_id)
-        match = vintages[vintages['realtime_start'] == release_date]
-        if not match.empty: return match.iloc[0]['value']
+        vintages = fred.get_series_all_releases(series_id).copy()
+        release_dt = pd.to_datetime(release_date).date()
+        match = vintages[pd.to_datetime(vintages['realtime_start']).dt.date == release_dt]
+        if match.empty:
+            return None
+
+        observation_col = 'observation_date' if 'observation_date' in match.columns else 'date'
+        if observation_col not in match.columns:
+            return float(match.iloc[0]['value'])
+
+        match = match.copy()
+        match['observation_date'] = pd.to_datetime(match[observation_col], errors='coerce')
+        match['value'] = pd.to_numeric(match['value'], errors='coerce')
+        match = match.dropna(subset=['observation_date', 'value'])
+        if match.empty:
+            return None
+
+        latest_obs = match['observation_date'].max()
+        latest_rows = match[match['observation_date'] == latest_obs]
+        return float(latest_rows.iloc[-1]['value'])
     except: return None
     return None
 
@@ -105,7 +122,7 @@ def apply_precise_timing(indicator_id, alfred_date):
     wall_clock_time = TYPICAL_TIMES.get(indicator_id, '08:30:00')
     naive_dt = datetime.strptime(f"{alfred_date} {wall_clock_time}", '%Y-%m-%d %H:%M:%S')
     eastern = pytz.timezone('US/Eastern')
-    localized_dt = eastern.localize(naive_dt, ambiguous='infer')
+    localized_dt = eastern.localize(naive_dt)
     return localized_dt.astimezone(pytz.utc)
 
 for indicator_id, vendor_names in INDICATOR_MAP.items():
@@ -121,6 +138,7 @@ for indicator_id, vendor_names in INDICATOR_MAP.items():
             precise_utc = apply_precise_timing(indicator_id, str(row['release_date']))
             results.append({
                 'value': val,
+                'release_date': str(row['release_date']),
                 'release_datetime': precise_utc.strftime('%Y-%m-%d %H:%M:%S'),
                 'release_time': TYPICAL_TIMES.get(indicator_id)
             })
