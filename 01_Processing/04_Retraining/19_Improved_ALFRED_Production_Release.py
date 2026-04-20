@@ -91,6 +91,27 @@ def write_csv(path_str, pdf):
     pdf.to_csv(path_str, index=False)
 
 
+def dataframe_to_markdown(pdf):
+    if pdf.empty:
+        return "| status |\n| --- |\n| no validation rows |\n"
+
+    render_pdf = pdf.copy()
+    render_pdf = render_pdf.fillna("")
+    columns = [str(column) for column in render_pdf.columns]
+    header = "| " + " | ".join(columns) + " |"
+    separator = "| " + " | ".join(["---"] * len(columns)) + " |"
+
+    rows = []
+    for _, row in render_pdf.iterrows():
+        values = []
+        for value in row.tolist():
+            text = str(value).replace("\n", "<br>").replace("|", "\\|")
+            values.append(text)
+        rows.append("| " + " | ".join(values) + " |")
+
+    return "\n".join([header, separator, *rows]) + "\n"
+
+
 def file_info(path_str):
     path = Path(path_str)
     if not path.exists():
@@ -676,7 +697,7 @@ elif mode == "validate":
         "",
         "## Validation",
         "",
-        validation_pdf.to_markdown(index=False),
+        dataframe_to_markdown(validation_pdf),
     ]
     write_text(f"{release_root}/deployment_summary.md", "\n".join(summary_lines) + "\n")
 
