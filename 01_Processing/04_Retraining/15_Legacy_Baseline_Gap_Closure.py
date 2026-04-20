@@ -768,6 +768,7 @@ label_lineage_audit["label_mismatch"] = (
 
 reference_silver_pdf = load_feature_frame(legacy_default_silver_table)
 pandas_silver_pdf = load_feature_frame(repaired_pandas_silver_table)
+candidate_silver_pdf = load_feature_frame(candidate_silver_table)
 
 silver_parity_pdf = compare_feature_frames(
     pandas_silver_pdf,
@@ -782,12 +783,36 @@ prior_signals_pdf = load_label_frame(prior_signal_path, "predicted_regime").rena
 )
 reference_signals_pdf = load_reference_signals()
 
-fixed_signals_pdf, fixed_backtest_pdf, fixed_metrics, monthly_validation_pdf = run_walkforward_variant(
-    candidate_silver_table,
-    legacy_label_path,
-    fixed_signal_table,
-    baseline_dir,
-)
+existing_signal_path = f"{baseline_dir}/walkforward_signals.csv"
+existing_backtest_path = f"{baseline_dir}/hourly_strategy_curve.csv"
+existing_monthly_path = f"{baseline_dir}/monthly_validation.csv"
+
+if (
+    Path(existing_signal_path).exists()
+    and Path(existing_backtest_path).exists()
+    and Path(existing_monthly_path).exists()
+):
+    fixed_signals_pdf = pd.read_csv(existing_signal_path, parse_dates=["timestamp"])
+    fixed_signals_pdf = normalize_timestamp(fixed_signals_pdf)
+    fixed_backtest_pdf = pd.read_csv(existing_backtest_path, parse_dates=["timestamp"])
+    fixed_backtest_pdf = normalize_timestamp(fixed_backtest_pdf)
+    monthly_validation_pdf = pd.read_csv(
+        existing_monthly_path,
+        parse_dates=["train_end", "test_end", "pred_first_timestamp", "pred_last_timestamp"],
+    )
+    fixed_metrics = compute_metrics(fixed_backtest_pdf.set_index("timestamp")["portfolio"])
+    fixed_metrics["Signal Rows"] = int(len(fixed_signals_pdf))
+    fixed_metrics["Total Switches"] = int(
+        fixed_backtest_pdf["position_changed"].fillna(False).astype(bool).sum()
+    )
+else:
+    fixed_signals_pdf, fixed_backtest_pdf, fixed_metrics, monthly_validation_pdf = run_walkforward_variant(
+        candidate_silver_table,
+        legacy_label_path,
+        fixed_signal_table,
+        baseline_dir,
+    )
+
 reference_metrics = load_reference_metrics()
 
 mismatch_audit_pdf = (
@@ -850,13 +875,13 @@ for i in range(len(retrain_dates) - 1):
     train_end = retrain_dates[i]
     test_end = retrain_dates[i + 1]
     month_key = str(pd.Timestamp(train_end).to_period("M"))
-    expected_first = spark_silver_pdf[
-        (spark_silver_pdf["timestamp"] >= train_end)
-        & (spark_silver_pdf["timestamp"] < test_end)
+    expected_first = candidate_silver_pdf[
+        (candidate_silver_pdf["timestamp"] >= train_end)
+        & (candidate_silver_pdf["timestamp"] < test_end)
     ]["timestamp"].min()
-    expected_last = spark_silver_pdf[
-        (spark_silver_pdf["timestamp"] >= train_end)
-        & (spark_silver_pdf["timestamp"] < test_end)
+    expected_last = candidate_silver_pdf[
+        (candidate_silver_pdf["timestamp"] >= train_end)
+        & (candidate_silver_pdf["timestamp"] < test_end)
     ]["timestamp"].max()
     train_test_rows.append(
         {
