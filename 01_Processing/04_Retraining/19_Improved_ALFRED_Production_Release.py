@@ -37,6 +37,7 @@ LIVE_MODEL_PATH = (
     f"/Volumes/{CATALOG}/{SCHEMA}/market_data/models/"
     "bt_fred_1d_xgboost_regime_live.joblib"
 )
+MODEL_DIR = str(Path(LIVE_MODEL_PATH).parent)
 FRED_API_KEY = "f52bdf7341f23d0458820ecd806178db"
 FRED_OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"
 KEY_INDICATORS = ["PAYEMS", "INDPRO", "CPIAUCSL", "UNRATE", "GDPC1"]
@@ -553,8 +554,54 @@ def validate_model_and_signal(pre_release_metadata):
     return checks, promoted_metadata
 
 
+def promote_registry_fix(release_root):
+    pre_release_metadata = json.loads(
+        Path(f"{release_root}/pre_release_model_metadata.json").read_text()
+    )
+    pre_registry = pre_release_metadata.get("latest_registry_row", {})
+    current_registry = latest_registry_row()
+    if not current_registry:
+        raise ValueError("model_registry_current is empty")
+
+    target_version = f"bt_fred_1d_xgboost_regime_{RELEASE_DATE.replace('-', '_')}"
+    if target_version == current_registry.get("model_version"):
+        target_version = f"{target_version}_release"
+
+    versioned_model_path = f"{MODEL_DIR}/{target_version}.joblib"
+    dbutils.fs.cp(LIVE_MODEL_PATH, versioned_model_path, True)
+
+    updated_registry = dict(current_registry)
+    updated_registry["model_version"] = target_version
+    updated_registry["model_path"] = LIVE_MODEL_PATH
+    updated_registry["versioned_model_path"] = versioned_model_path
+    updated_registry["promoted_ts"] = datetime.now(timezone.utc).isoformat()
+
+    registry_sdf = spark.createDataFrame(pd.DataFrame([updated_registry]))
+    registry_sdf.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+        MODEL_REGISTRY_TABLE
+    )
+
+    result = {
+        "status": "success",
+        "phase": "promote_registry_fix",
+        "release_root": release_root,
+        "pre_release_model_version": pre_registry.get("model_version"),
+        "pre_release_versioned_model_path": pre_registry.get("versioned_model_path"),
+        "retrained_live_alias_path": LIVE_MODEL_PATH,
+        "promoted_model_version": target_version,
+        "promoted_model_path": LIVE_MODEL_PATH,
+        "versioned_model_path": versioned_model_path,
+    }
+    write_json(f"{release_root}/post_retrain_registry_fix.json", result)
+    return result
+
+
 if "dbutils" in globals():
-    dbutils.widgets.dropdown("mode", "snapshot", ["snapshot", "validate"])
+    dbutils.widgets.dropdown(
+        "mode",
+        "snapshot",
+        ["snapshot", "validate", "promote_registry_fix"],
+    )
     dbutils.widgets.text("release_root", RELEASE_ROOT_DEFAULT)
     dbutils.widgets.text("executed_runs_json", "")
     dbutils.widgets.text("repo_branch_before", "")
@@ -599,6 +646,8 @@ ensure_dir(release_root)
 
 if mode == "snapshot":
     result = snapshot_pre_release(release_root)
+elif mode == "promote_registry_fix":
+    result = promote_registry_fix(release_root)
 elif mode == "validate":
     pre_release_model_metadata = json.loads(
         Path(f"{release_root}/pre_release_model_metadata.json").read_text()
