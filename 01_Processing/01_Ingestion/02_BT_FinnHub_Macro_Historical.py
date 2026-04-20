@@ -122,7 +122,7 @@ def apply_precise_timing(indicator_id, alfred_date):
     wall_clock_time = TYPICAL_TIMES.get(indicator_id, '08:30:00')
     naive_dt = datetime.strptime(f"{alfred_date} {wall_clock_time}", '%Y-%m-%d %H:%M:%S')
     eastern = pytz.timezone('US/Eastern')
-    localized_dt = eastern.localize(naive_dt, ambiguous='infer')
+    localized_dt = eastern.localize(naive_dt)
     return localized_dt.astimezone(pytz.utc)
 
 for indicator_id, vendor_names in INDICATOR_MAP.items():
