@@ -503,54 +503,75 @@ def build_macro_variant(haystack_df, selection_mode, target_table, variant_dir):
 
 
 def build_legacy_silver(macro_table, target_table):
-    max_ts_row = (
-        spark.sql(f"SELECT MAX(timestamp) AS max_ts FROM {market_table}")
-        .collect()[0]
-    )
-    end_date = max_ts_row["max_ts"]
-    start_date = "2016-01-01 00:00:00"
-
-    backbone = (
-        spark.range(0, 15 * 365 * 24)
-        .withColumn(
-            "timestamp",
-            F.to_timestamp(F.lit(start_date))
-            + (F.col("id") * F.expr("INTERVAL 1 HOUR")),
-        )
-        .filter(F.col("timestamp") <= F.lit(end_date))
-        .select("timestamp")
-    )
-
-    macro_df = spark.table(macro_table).dropDuplicates(["timestamp", "indicator_id"])
-    market_df = (
+    start_date = pd.Timestamp("2016-01-01 00:00:00")
+    market_pdf = (
         spark.table(market_table)
         .filter(F.col("symbol") == "SPY")
-        .dropDuplicates(["timestamp"])
+        .select("timestamp", F.col("close").alias("SPY_close"))
+        .toPandas()
     )
-    vix3m_df = spark.table(vix3m_table).dropDuplicates(["timestamp"])
-    vix_spot_df = spark.table(vix_spot_table).dropDuplicates(["timestamp"])
+    market_pdf = normalize_timestamp(market_pdf)
+    market_pdf = market_pdf.dropna(subset=["timestamp"]).drop_duplicates(
+        subset=["timestamp"], keep="last"
+    )
+    market_pdf = market_pdf.sort_values("timestamp")
+    end_date = market_pdf["timestamp"].max()
 
-    if VIX_SOURCE == "portara_1h":
-        vix3m_lagged = vix3m_df.withColumn(
-            "v3m_join_ts",
-            F.to_timestamp(F.col("timestamp")) + F.expr("INTERVAL 1 DAY"),
-        )
-    else:
-        vix3m_lagged = (
-            vix3m_df.withColumnRenamed("close", "vix3m")
-            .withColumn("v3m_join_ts", F.col("timestamp"))
-        )
+    backbone_pdf = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(
+                start=start_date,
+                end=end_date,
+                freq="H",
+            )
+        }
+    )
 
+    macro_pdf = spark.table(macro_table).toPandas()
+    macro_pdf = normalize_timestamp(macro_pdf)
+    macro_pdf = macro_pdf.dropna(subset=["timestamp"])
+    macro_pdf = macro_pdf.drop_duplicates(
+        subset=["timestamp", "indicator_id"],
+        keep="last",
+    )
+    macro_pdf["join_ts"] = (
+        macro_pdf["timestamp"] + pd.Timedelta(hours=2)
+    ).dt.floor("H")
     macro_prepared = (
-        macro_df.withColumn(
-            "join_ts",
-            F.date_trunc("hour", F.col("timestamp") + F.expr("INTERVAL 2 HOUR")),
+        macro_pdf.pivot_table(
+            index="join_ts",
+            columns="indicator_id",
+            values="actual",
+            aggfunc="mean",
         )
-        .select("join_ts", "indicator_id", "actual")
-        .groupBy("join_ts")
-        .pivot("indicator_id")
-        .avg("actual")
+        .reset_index()
+        .rename(columns={"join_ts": "timestamp"})
     )
+
+    vix3m_pdf = spark.table(vix3m_table).toPandas()
+    vix3m_pdf = normalize_timestamp(vix3m_pdf)
+    vix3m_pdf = vix3m_pdf.dropna(subset=["timestamp"]).drop_duplicates(
+        subset=["timestamp"], keep="last"
+    )
+    if VIX_SOURCE == "portara_1h":
+        vix3m_pdf["timestamp"] = vix3m_pdf["timestamp"] + pd.Timedelta(days=1)
+        vix3m_pdf["vix3m"] = pd.to_numeric(vix3m_pdf["vix3m"], errors="coerce")
+    else:
+        vix3m_pdf["vix3m"] = pd.to_numeric(vix3m_pdf["close"], errors="coerce")
+    vix3m_pdf = vix3m_pdf[["timestamp", "vix3m"]]
+
+    vix_spot_pdf = spark.table(vix_spot_table).toPandas()
+    vix_spot_pdf = normalize_timestamp(vix_spot_pdf)
+    vix_spot_pdf = vix_spot_pdf.dropna(subset=["timestamp"]).drop_duplicates(
+        subset=["timestamp"], keep="last"
+    )
+    vix_spot_pdf["VIXCLS"] = pd.to_numeric(vix_spot_pdf["close"], errors="coerce")
+    vix_spot_pdf = vix_spot_pdf[["timestamp", "VIXCLS"]]
+
+    silver_grid = backbone_pdf.merge(macro_prepared, on="timestamp", how="left")
+    silver_grid = silver_grid.merge(market_pdf, on="timestamp", how="left")
+    silver_grid = silver_grid.merge(vix3m_pdf, on="timestamp", how="left")
+    silver_grid = silver_grid.merge(vix_spot_pdf, on="timestamp", how="left")
 
     required_macro_columns = [
         "CPIAUCSL",
@@ -563,45 +584,9 @@ def build_legacy_silver(macro_table, target_table):
         "UMCSENT",
     ]
     for column_name in required_macro_columns:
-        if column_name not in macro_prepared.columns:
-            macro_prepared = macro_prepared.withColumn(
-                column_name,
-                F.lit(None).cast("double"),
-            )
+        if column_name not in silver_grid.columns:
+            silver_grid[column_name] = np.nan
 
-    silver_grid = (
-        backbone.join(
-            macro_prepared,
-            backbone.timestamp == macro_prepared.join_ts,
-            "left",
-        )
-        .join(
-            market_df.select(
-                F.col("timestamp").alias("m_ts"),
-                F.col("close").alias("SPY_close"),
-            ),
-            F.col("timestamp") == F.col("m_ts"),
-            "left",
-        )
-        .join(
-            vix3m_lagged.select(
-                F.col("v3m_join_ts").alias("v3m_ts"),
-                F.col("vix3m"),
-            ),
-            F.col("timestamp") == F.col("v3m_ts"),
-            "left",
-        )
-        .join(
-            vix_spot_df.select(
-                F.col("timestamp").alias("vs_ts"),
-                F.col("close").alias("VIXCLS"),
-            ),
-            F.col("timestamp") == F.col("vs_ts"),
-            "left",
-        )
-    )
-
-    win_ffill = Window.orderBy("timestamp").rowsBetween(Window.unboundedPreceding, 0)
     fill_cols = [
         "CPIAUCSL",
         "PCEPI",
@@ -615,20 +600,8 @@ def build_legacy_silver(macro_table, target_table):
         "vix3m",
         "SPY_close",
     ]
-
-    for col_name in fill_cols:
-        if col_name not in silver_grid.columns:
-            silver_grid = silver_grid.withColumn(
-                col_name,
-                F.lit(None).cast("double"),
-            )
-        silver_grid = silver_grid.withColumn(
-            col_name,
-            F.last(F.col(col_name), True).over(win_ffill),
-        )
-
-    win_lag = Window.orderBy("timestamp")
-    win_z = Window.orderBy("timestamp").rowsBetween(-8760, 0)
+    silver_grid = silver_grid.sort_values("timestamp").reset_index(drop=True)
+    silver_grid[fill_cols] = silver_grid[fill_cols].ffill()
 
     z_targets = [
         "CPIAUCSL",
@@ -642,44 +615,42 @@ def build_legacy_silver(macro_table, target_table):
         "VIXCLS",
         "vix3m",
     ]
+    window_size = 8761
     for col_name in z_targets:
-        avg_col = F.avg(F.col(col_name)).over(win_z)
-        std_col = F.stddev(F.col(col_name)).over(win_z)
-        silver_grid = silver_grid.withColumn(
-            f"{col_name}_z",
-            (F.col(col_name) - avg_col) / F.when(std_col == 0, 1).otherwise(std_col),
-        )
+        rolling_mean = silver_grid[col_name].rolling(window_size, min_periods=1).mean()
+        rolling_std = silver_grid[col_name].rolling(window_size, min_periods=2).std()
+        denominator = rolling_std.where(rolling_std != 0, 1)
+        silver_grid[f"{col_name}_z"] = (
+            silver_grid[col_name] - rolling_mean
+        ) / denominator
 
-    silver_grid = (
-        silver_grid.withColumn(
-            "CPI_Shock",
-            F.abs(F.col("CPIAUCSL") - F.lag("CPIAUCSL", 1).over(win_lag)),
-        )
-        .withColumn(
-            "NFP_Shock",
-            F.abs(F.col("PAYEMS") - F.lag("PAYEMS", 1).over(win_lag)),
-        )
+    silver_grid["CPI_Shock"] = (
+        silver_grid["CPIAUCSL"] - silver_grid["CPIAUCSL"].shift(1)
+    ).abs()
+    silver_grid["NFP_Shock"] = (
+        silver_grid["PAYEMS"] - silver_grid["PAYEMS"].shift(1)
+    ).abs()
+    silver_grid["CPI_Event_Active"] = (
+        (silver_grid["CPI_Shock"] > 0)
+        .astype(int)
+        .rolling(49, min_periods=1)
+        .max()
     )
-
-    def pulse_event(col_name, hours=48):
-        is_event = F.when(F.col(col_name) > 0, 1).otherwise(0)
-        return F.max(is_event).over(
-            Window.orderBy("timestamp").rowsBetween(-hours, 0)
-        )
-
-    silver_grid = (
-        silver_grid.withColumn("CPI_Event_Active", pulse_event("CPI_Shock"))
-        .withColumn("NFP_Event_Active", pulse_event("NFP_Shock"))
-        .withColumn("VIX_Inversion_Z", F.col("VIXCLS_z") - F.col("vix3m_z"))
-        .withColumn(
-            "Price_Mom_24H",
-            (F.lag(F.col("SPY_close"), 1).over(win_lag) /
-             F.lag(F.col("SPY_close"), 25).over(win_lag)) - 1,
-        )
+    silver_grid["NFP_Event_Active"] = (
+        (silver_grid["NFP_Shock"] > 0)
+        .astype(int)
+        .rolling(49, min_periods=1)
+        .max()
     )
+    silver_grid["VIX_Inversion_Z"] = (
+        silver_grid["VIXCLS_z"] - silver_grid["vix3m_z"]
+    )
+    silver_grid["Price_Mom_24H"] = (
+        silver_grid["SPY_close"].shift(1) / silver_grid["SPY_close"].shift(25)
+    ) - 1
 
-    final_silver = (
-        silver_grid.select(
+    final_silver = silver_grid[
+        [
             "timestamp",
             "SPY_close",
             "CPIAUCSL_z",
@@ -696,16 +667,10 @@ def build_legacy_silver(macro_table, target_table):
             "Price_Mom_24H",
             "CPI_Event_Active",
             "NFP_Event_Active",
-        )
-        .filter(F.col("SPY_close").isNotNull())
-    )
-
-    (
-        final_silver.write.mode("overwrite")
-        .option("overwriteSchema", "true")
-        .format("delta")
-        .saveAsTable(target_table)
-    )
+        ]
+    ].copy()
+    final_silver = final_silver[final_silver["SPY_close"].notna()].reset_index(drop=True)
+    write_delta_table_from_pandas(final_silver, target_table)
     return table_row_range(target_table)
 
 
