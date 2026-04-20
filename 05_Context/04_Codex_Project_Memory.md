@@ -34,6 +34,7 @@ This file exists so future Codex chats can recover the operating context for thi
 - As of `2026-04-20`, production ALFRED selection uses the latest `observation_date` within the matched release bucket; the old first-row selection behavior is retired for the active production path.
 - The corrected ALFRED production release promoted model version `bt_fred_1d_xgboost_regime_2026_04_20`; the live alias path remains `/Volumes/pawan_quant_research_1/v4/market_data/models/bt_fred_1d_xgboost_regime_live.joblib`.
 - Release validation passed overall, but a historical silver PIT-join caveat remains open for `CPIAUCSL`, `GDPC1`, and `INDPRO`; RT silver alignment and dashboard validation passed.
+- Post-release cleanup aligned local Git `main`, the Databricks repo branch `main`, and the repo-backed workspace path `/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github` at repo id `2360562195327963`.
 - For full release context and rollback anchors, read `2026-04-20_improved_alfred_model_update_bug_addressal_report.md`.
 
 ## Why This Exists
