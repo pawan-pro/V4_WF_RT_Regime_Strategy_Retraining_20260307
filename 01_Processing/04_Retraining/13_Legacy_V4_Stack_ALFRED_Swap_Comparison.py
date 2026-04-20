@@ -552,6 +552,23 @@ def build_legacy_silver(macro_table, target_table):
         .avg("actual")
     )
 
+    required_macro_columns = [
+        "CPIAUCSL",
+        "PCEPI",
+        "PCE",
+        "PAYEMS",
+        "UNRATE",
+        "GDPC1",
+        "INDPRO",
+        "UMCSENT",
+    ]
+    for column_name in required_macro_columns:
+        if column_name not in macro_prepared.columns:
+            macro_prepared = macro_prepared.withColumn(
+                column_name,
+                F.lit(None).cast("double"),
+            )
+
     silver_grid = (
         backbone.join(
             macro_prepared,
@@ -600,6 +617,11 @@ def build_legacy_silver(macro_table, target_table):
     ]
 
     for col_name in fill_cols:
+        if col_name not in silver_grid.columns:
+            silver_grid = silver_grid.withColumn(
+                col_name,
+                F.lit(None).cast("double"),
+            )
         silver_grid = silver_grid.withColumn(
             col_name,
             F.last(F.col(col_name), True).over(win_ffill),
