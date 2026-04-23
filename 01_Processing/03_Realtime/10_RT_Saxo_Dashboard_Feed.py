@@ -193,6 +193,8 @@ if "overwrite_dataframe_with_retry" not in globals():
 # ---------------------------------------------------------------------------
 CATALOG = "pawan_quant_research_1"
 SCHEMA = "v4"
+MONITORING_START_DATE = "2026-04-20"
+MONITORING_START_TS = datetime(2026, 4, 20)
 
 SIGNAL_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_regime_signal"
 SILVER_RT = f"{CATALOG}.{SCHEMA}.silver_rt_1h"
@@ -576,6 +578,13 @@ def ensure_target_table(schema: StructType) -> None:
             allocation_delta_bp DOUBLE,
             actual_cash_pct DOUBLE,
             dashboard_data_freshness_minutes DOUBLE,
+            monitoring_start_date STRING,
+            regime_mix_start_date STRING,
+            alpha_anchor_start_ts TIMESTAMP,
+            drawdown_since_start_pct DOUBLE,
+            freshness_market_minutes DOUBLE,
+            freshness_macro_minutes DOUBLE,
+            freshness_audit_minutes DOUBLE,
             last_skip_reason STRING,
             last_error_reason STRING,
             last_skip_count_24h INT,
@@ -797,31 +806,44 @@ def load_portfolio_metrics(execution_mode: str) -> dict[str, Optional[float]]:
     }
 
 
-def load_total_return(latest_equity: Optional[float], first_trade_ts: Optional[datetime], execution_mode: str) -> Optional[float]:
-    if latest_equity is None or first_trade_ts is None:
-        return None
+def load_monitoring_anchor_metrics(execution_mode: str) -> dict[str, Optional[datetime] | Optional[float]]:
+    monitoring_start_literal = sql_timestamp(MONITORING_START_TS)
+    if monitoring_start_literal is None:
+        return {
+            "first_trade_ts": None,
+            "anchor_equity": None,
+            "peak_equity": None,
+        }
 
-    anchor_row = scalar_row(
+    row = scalar_row(
         f"""
-        SELECT account_equity AS anchor_equity
+        SELECT
+            MIN(trade_ts) AS first_trade_ts,
+            MIN_BY(account_equity, trade_ts) AS anchor_equity,
+            MAX(account_equity) AS peak_equity
         FROM {TRADE_LOG}
         WHERE execution_mode = '{execution_mode}'
-          AND trade_ts >= TIMESTAMP('{first_trade_ts}')
+          AND trade_ts >= TIMESTAMP('{monitoring_start_literal}')
           AND account_equity IS NOT NULL
-        ORDER BY trade_ts ASC
-        LIMIT 1
         """
     )
-    if not anchor_row or anchor_row["anchor_equity"] is None:
-        return None
+    if not row:
+        return {"first_trade_ts": None, "anchor_equity": None, "peak_equity": None}
 
-    anchor_equity = maybe_float(anchor_row["anchor_equity"])
-    if anchor_equity in (None, 0.0):
+    return {
+        "first_trade_ts": safe_ts(row, "first_trade_ts"),
+        "anchor_equity": maybe_float(row["anchor_equity"]),
+        "peak_equity": maybe_float(row["peak_equity"]),
+    }
+
+
+def load_total_return(latest_equity: Optional[float], anchor_equity: Optional[float]) -> Optional[float]:
+    if latest_equity is None or anchor_equity in (None, 0.0):
         return None
     return latest_equity / anchor_equity - 1.0
 
 
-def load_alpha_pct(execution_mode: str, latest_equity: Optional[float], latest_trade_ts: Optional[datetime], regime_start_ts: Optional[datetime]) -> Optional[float]:
+def load_alpha_pct(execution_mode: str, latest_equity: Optional[float], latest_trade_ts: Optional[datetime], anchor_ts: Optional[datetime]) -> Optional[float]:
     """
     Compute benchmark-adjusted alpha from strategy and SPY path.
     Uses sparse-safe fallback to latest signal row if history is thin.
@@ -829,7 +851,7 @@ def load_alpha_pct(execution_mode: str, latest_equity: Optional[float], latest_t
     if latest_equity is None or latest_trade_ts is None:
         return None
 
-    anchor_ts = regime_start_ts or latest_trade_ts
+    anchor_ts = anchor_ts or latest_trade_ts
     anchor_row = scalar_row(
         f"""
         SELECT account_equity AS strategy_equity_anchor, spy_close AS spy_close_anchor
@@ -873,6 +895,10 @@ def load_regime_distribution(execution_mode: str) -> dict[str, Optional[float]]:
     if not table_exists(AUDIT_LOG):
         return {"pct_expansion": 0.0, "pct_slowdown": 0.0, "pct_recession": 0.0, "rows": 0}
 
+    monitoring_start_literal = sql_timestamp(MONITORING_START_TS)
+    if monitoring_start_literal is None:
+        return {"pct_expansion": 0.0, "pct_slowdown": 0.0, "pct_recession": 0.0, "rows": 0}
+
     row = scalar_row(
         f"""
         SELECT
@@ -891,6 +917,7 @@ def load_regime_distribution(execution_mode: str) -> dict[str, Optional[float]]:
             ) AS pct_recession
         FROM {AUDIT_LOG}
         WHERE execution_mode = '{execution_mode}'
+          AND audit_ts >= TIMESTAMP('{monitoring_start_literal}')
         """
     )
     if not row:
@@ -1281,6 +1308,13 @@ def build_output_schema() -> StructType:
             StructField("allocation_delta_bp", DoubleType(), True),
             StructField("actual_cash_pct", DoubleType(), True),
             StructField("dashboard_data_freshness_minutes", DoubleType(), True),
+            StructField("monitoring_start_date", StringType(), True),
+            StructField("regime_mix_start_date", StringType(), True),
+            StructField("alpha_anchor_start_ts", TimestampType(), True),
+            StructField("drawdown_since_start_pct", DoubleType(), True),
+            StructField("freshness_market_minutes", DoubleType(), True),
+            StructField("freshness_macro_minutes", DoubleType(), True),
+            StructField("freshness_audit_minutes", DoubleType(), True),
             StructField("last_skip_reason", StringType(), True),
             StructField("last_error_reason", StringType(), True),
             StructField("last_execution_action", StringType(), True),
@@ -1306,6 +1340,7 @@ def main() -> None:
 
     prices = load_price_snapshot()
     portfolio = load_portfolio_metrics(execution_mode)
+    monitoring_portfolio = load_monitoring_anchor_metrics(execution_mode)
     portfolio_rows = load_regime_distribution(execution_mode)
     audit_health = load_audit_health(execution_mode)
 
@@ -1325,20 +1360,16 @@ def main() -> None:
         current_regime_int,
     )
 
-    total_return_pct = load_total_return(
-        latest_equity,
-        portfolio.get("first_trade_ts"),
-        execution_mode,
-    )
+    total_return_pct = load_total_return(latest_equity, monitoring_portfolio.get("anchor_equity"))
     drawdown_pct = None
-    if portfolio.get("peak_equity") not in (None, 0.0) and latest_equity is not None:
-        drawdown_pct = latest_equity / portfolio["peak_equity"] - 1.0
+    if monitoring_portfolio.get("peak_equity") not in (None, 0.0) and latest_equity is not None:
+        drawdown_pct = latest_equity / monitoring_portfolio["peak_equity"] - 1.0
 
     alpha_pct = load_alpha_pct(
         execution_mode=execution_mode,
         latest_equity=latest_equity,
         latest_trade_ts=safe_ts(trade_row, "trade_ts"),
-        regime_start_ts=current_regime_start_ts,
+        anchor_ts=monitoring_portfolio.get("first_trade_ts"),
     )
 
     trade_ts = safe_ts(trade_row, "trade_ts") if trade_row else None
@@ -1413,6 +1444,27 @@ def main() -> None:
         if price_ts_row:
             price_ts = price_ts_row.get("max_ts")
 
+    freshness_market_minutes = None
+    freshness_macro_minutes = None
+    freshness_audit_minutes = None
+    for source_ts, field_name in (
+        (price_ts, "freshness_market_minutes"),
+        (macro_last_release, "freshness_macro_minutes"),
+        (latest_audit_ts, "freshness_audit_minutes"),
+    ):
+        if source_ts is None:
+            continue
+        try:
+            lag_minutes = (dashboard_ts - source_ts).total_seconds() / 60.0
+        except Exception:
+            lag_minutes = None
+        if field_name == "freshness_market_minutes":
+            freshness_market_minutes = maybe_float(lag_minutes)
+        elif field_name == "freshness_macro_minutes":
+            freshness_macro_minutes = maybe_float(lag_minutes)
+        else:
+            freshness_audit_minutes = maybe_float(lag_minutes)
+
     dashboard_row = {
         "feed_ts": dashboard_ts,
         "dashboard_ts": dashboard_ts,
@@ -1477,6 +1529,13 @@ def main() -> None:
         "allocation_delta_bp": allocation_delta_bp,
         "actual_cash_pct": maybe_float(actual_cash_pct),
         "dashboard_data_freshness_minutes": maybe_float(dashboard_data_freshness_minutes),
+        "monitoring_start_date": MONITORING_START_DATE,
+        "regime_mix_start_date": MONITORING_START_DATE,
+        "alpha_anchor_start_ts": monitoring_portfolio.get("first_trade_ts"),
+        "drawdown_since_start_pct": drawdown_pct,
+        "freshness_market_minutes": freshness_market_minutes,
+        "freshness_macro_minutes": freshness_macro_minutes,
+        "freshness_audit_minutes": freshness_audit_minutes,
         "last_skip_reason": last_skip_reason,
         "last_error_reason": last_error_reason,
         "last_execution_action": last_execution_action,
