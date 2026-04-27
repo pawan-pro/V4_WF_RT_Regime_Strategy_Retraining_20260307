@@ -19,6 +19,7 @@ This file exists so future Codex chats can recover the operating context for thi
 - `956566325960795` `v4_rt_hourly_chain`
 - `233851783017472` `v4_saxo_token_refresher`
 - `757971858926245` `V4.1-Token_Refresher_Job_SB` -> must remain paused
+- `516523889858332` `v4_saxo_institutional_dashboard_daily_pdf` -> daily 06:00 Asia/Singapore PDF report job
 
 ## Live Macro Findings To Carry Forward
 

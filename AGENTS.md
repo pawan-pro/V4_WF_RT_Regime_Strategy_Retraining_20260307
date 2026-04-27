@@ -26,6 +26,7 @@ Read this before changing Databricks jobs, Saxo auth, or realtime pipelines in t
 - `v4_saxo_live_hourly_chain` schedule: `:01` every hour, `America/New_York`
 - `v4_rt_hourly_chain` schedule: `:06` every hour, `America/New_York`
 - `v4_saxo_token_refresher` schedule: every 10 minutes
+- `v4_saxo_institutional_dashboard_daily_pdf` schedule: `06:00` daily, `Asia/Singapore`
 
 ## Compute Constraint
 
