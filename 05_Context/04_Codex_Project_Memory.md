@@ -22,12 +22,10 @@ This file exists so future Codex chats can recover the operating context for thi
 
 ## Live Macro Findings To Carry Forward
 
-- Feature branch `feat/rt-live-finnhub-core-macro-cpi-umcsent` adds Finnhub-first live macro capture for CPI/UMCSENT via `bronze_rt_macro_events_live` and workflow task `rt_01b_macro_events`.
+- Finnhub-first live macro capture flows through `bronze_rt_macro_events_live` and workflow task `rt_01b_macro_events`.
 - Durable guardrail from validation: before `scheduled_release_ts`, live macro rows must stay scheduled-only with null observed fields; the pre-release observation leak was real and is now fixed on that branch.
-- CPI live capture/validation is operationally faster than the old batch-only path, but any RT feature impact is still gated by the next hourly RT bucket.
+- Live macro override Phase 1 expands scope to `PCEPI`, `PCE`, and `GDPC1`, preserving `CPIAUCSL` and final-only `UMCSENT` guardrails.
 - `UMCSENT` live override is final-only; `Michigan Consumer Sentiment Prel` must fall back to historical silver carry-forward.
-- Broader macro rollout and the model's future event-awareness path are deferred to a later session.
-- Merge blocker from this session: the branch did not yet prove CPI override impact in `silver_rt_1h`; fallback and live CPI values matched on the tested release, and the explicit live z-score recompute path needs a second-pass review before production merge.
 
 ## Improved ALFRED Production State
 

@@ -53,9 +53,8 @@ Read this before changing Databricks jobs, Saxo auth, or realtime pipelines in t
 
 - `bronze_rt_macro_events_live` is the live macro capture table for Finnhub-first schedule/value rows used by the Saxo hourly chain.
 - Before `scheduled_release_ts`, live macro rows must remain scheduled-only: `status=scheduled`, `observed_value=null`, `observed_timestamp=null`, `validation_status=not_checked`.
-- CPI live capture can arrive faster than the historical batch path, but any impact on RT features/signals is still gated by the next hourly RT market bucket.
+- Live macro override Phase 1 expands scope to `PCEPI`, `PCE`, and `GDPC1`, preserving `CPIAUCSL` and final-only `UMCSENT` guardrails.
 - `UMCSENT` live override is final-only. Preliminary Michigan sentiment releases must not override RT silver.
-- Broader live macro rollout and explicit future event-awareness logic are deferred work; do not assume CPI/UMCSENT handling generalizes to other indicators yet.
 
 ## Change Discipline
 

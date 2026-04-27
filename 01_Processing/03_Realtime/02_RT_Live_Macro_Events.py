@@ -19,7 +19,7 @@ TARGET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_macro_events_live"
 
 FINNHUB_API_KEY = "d5s3pchr01qoo9r2f3h0d5s3pchr01qoo9r2f3hg"
 
-TARGET_INDICATORS = {"CPIAUCSL", "UMCSENT"}
+TARGET_INDICATORS = {"CPIAUCSL", "UMCSENT", "PCEPI", "PCE", "GDPC1"}
 TARGET_EVENT_ALIASES = {
     "CPIAUCSL": [
         "consumer price index (cpi)",
@@ -33,6 +33,19 @@ TARGET_EVENT_ALIASES = {
         "michigan consumer sentiment",
         "consumer sentiment",
         "u mich",
+    ],
+    "PCEPI": [
+        "core pce price index",
+        "pce price index",
+        "united states consumption core pce price index mm",
+    ],
+    "PCE": [
+        "personal consumption expenditures",
+        "united states consumption personal consumption expenditures",
+    ],
+    "GDPC1": [
+        "real gdp",
+        "gdp growth rate",
     ],
 }
 
@@ -57,7 +70,7 @@ def normalize_text(value):
 def canonical_indicator(event_name):
     normalized = normalize_text(event_name)
     for indicator_id, aliases in TARGET_EVENT_ALIASES.items():
-        if any(alias in normalized for alias in aliases):
+        if any(normalize_text(alias) in normalized for alias in aliases):
             return indicator_id
     return None
 
@@ -74,7 +87,7 @@ def infer_release_stage(event_name):
 def infer_validation_status(indicator_id, release_stage, status):
     if status != "observed":
         return "not_checked"
-    if indicator_id == "CPIAUCSL":
+    if indicator_id in {"CPIAUCSL", "PCEPI", "PCE", "GDPC1"}:
         return "validated"
     if indicator_id == "UMCSENT":
         if release_stage == "prelim":
@@ -242,7 +255,7 @@ res = client.calendar_economic(_from=str(window_start), to=str(window_end))
 rows = build_rows_from_calendar(res)
 
 if not rows:
-    print("No CPI/UMCSENT calendar rows found for live window")
+    print("No target macro calendar rows found for live window")
     dbutils.notebook.exit("NO_NEW_CORE_MACRO_EVENTS")
 
 macro_df = pd.DataFrame(rows)
@@ -293,7 +306,7 @@ latest_schedule = spark.sql(
            release_stage,
            validation_status
     FROM {TARGET_TABLE}
-    WHERE indicator_id IN ('CPIAUCSL', 'UMCSENT')
+    WHERE indicator_id IN ('CPIAUCSL', 'UMCSENT', 'PCEPI', 'PCE', 'GDPC1')
     ORDER BY scheduled_release_ts DESC, indicator_id
     """
 ).show(truncate=False)
