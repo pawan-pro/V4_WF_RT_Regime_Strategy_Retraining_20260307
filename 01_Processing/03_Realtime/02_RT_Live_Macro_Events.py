@@ -19,7 +19,7 @@ TARGET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_macro_events_live"
 
 FINNHUB_API_KEY = "d5s3pchr01qoo9r2f3h0d5s3pchr01qoo9r2f3hg"
 
-TARGET_INDICATORS = {"CPIAUCSL", "UMCSENT"}
+TARGET_INDICATORS = {"CPIAUCSL", "GDPC1", "PCE", "PCEPI", "UMCSENT"}
 TARGET_EVENT_ALIASES = {
     "CPIAUCSL": [
         "consumer price index (cpi)",
@@ -27,6 +27,21 @@ TARGET_EVENT_ALIASES = {
         "cpi mm, sa",
         "consumer price index",
         "consumer price index (cpi)",
+    ],
+    "GDPC1": [
+        "gdp growth rate",
+        "real gdp",
+        "united states-gdp",
+    ],
+    "PCE": [
+        "personal consumption expenditures",
+        "personal spending",
+        "united states-consumption-personal consumption expenditures",
+    ],
+    "PCEPI": [
+        "pce price index",
+        "core pce price index",
+        "united states-consumption-core pce price index",
     ],
     "UMCSENT": [
         "u mich sentiment",
@@ -64,17 +79,23 @@ def canonical_indicator(event_name):
 
 def infer_release_stage(event_name):
     normalized = normalize_text(event_name)
+    if "advance" in normalized or " adv" in f" {normalized} ":
+        return "advance"
+    if "2nd" in normalized or "second" in normalized:
+        return "second"
+    if "3rd" in normalized or "third" in normalized:
+        return "third"
     if "prel" in normalized:
         return "prelim"
     if "final" in normalized:
         return "final"
-    return "unknown"
+    return "standard"
 
 
 def infer_validation_status(indicator_id, release_stage, status):
     if status != "observed":
         return "not_checked"
-    if indicator_id == "CPIAUCSL":
+    if indicator_id in {"CPIAUCSL", "GDPC1", "PCE", "PCEPI"}:
         return "validated"
     if indicator_id == "UMCSENT":
         if release_stage == "prelim":
@@ -88,11 +109,13 @@ def estimate_confidence(event_name, status):
     if status != "observed":
         return "scheduled"
 
-    normalized = normalize_text(event_name)
-    if "prelim" in normalized:
+    release_stage = infer_release_stage(event_name)
+    if release_stage in {"advance", "prelim"}:
         return "low"
-    if "final" in normalized:
+    if release_stage in {"final", "third"}:
         return "high"
+    if release_stage == "second":
+        return "medium"
     return "medium"
 
 
@@ -242,7 +265,7 @@ res = client.calendar_economic(_from=str(window_start), to=str(window_end))
 rows = build_rows_from_calendar(res)
 
 if not rows:
-    print("No CPI/UMCSENT calendar rows found for live window")
+    print("No phase-1 live macro calendar rows found for current window")
     dbutils.notebook.exit("NO_NEW_CORE_MACRO_EVENTS")
 
 macro_df = pd.DataFrame(rows)
@@ -290,12 +313,24 @@ latest_schedule = spark.sql(
            status,
            confidence,
            reconciled_with_alfred,
+           observed_timestamp,
            release_stage,
-           validation_status
+           validation_status,
+           ingestion_ts
     FROM {TARGET_TABLE}
-    WHERE indicator_id IN ('CPIAUCSL', 'UMCSENT')
+    WHERE indicator_id IN ('CPIAUCSL', 'GDPC1', 'PCE', 'PCEPI', 'UMCSENT')
     ORDER BY scheduled_release_ts DESC, indicator_id
     """
 ).show(truncate=False)
 
 print("Live macro events written:", len(rows))
+print(
+    f"""
+Validation SQL - live macro rows
+SELECT indicator_id, provider_event_name, scheduled_release_ts, observed_value,
+       status, confidence, release_stage, validation_status, observed_timestamp, ingestion_ts
+FROM {TARGET_TABLE}
+WHERE indicator_id IN ('GDPC1', 'PCE', 'PCEPI')
+ORDER BY scheduled_release_ts DESC, indicator_id, ingestion_ts DESC;
+""".strip()
+)

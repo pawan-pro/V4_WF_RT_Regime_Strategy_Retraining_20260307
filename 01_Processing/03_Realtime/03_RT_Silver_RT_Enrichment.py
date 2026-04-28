@@ -35,6 +35,9 @@ VIX_Z_WINDOW_HOURS = 8760
 PRICE_CONTEXT_HOURS = 72
 LIVE_MACRO_INDICATORS = {
     "CPIAUCSL": "CPIAUCSL",
+    "GDPC1": "GDPC1",
+    "PCE": "PCE",
+    "PCEPI": "PCEPI",
     "UMCSENT": "UMCSENT",
 }
 
@@ -346,9 +349,12 @@ ensure_target_table()
 
 rt_ts, spy_close, vix_close, vix3m_close, vix_latest_date = load_latest_rt_inputs()
 macro_state = load_macro_state(rt_ts)
-live_macro_source = {"CPIAUCSL": "bt_silver", "UMCSENT": "bt_silver"}
+live_macro_source = {indicator_id: "bt_silver" for indicator_id in LIVE_MACRO_INDICATORS}
 macro_features = {
     "CPIAUCSL_z": to_py_float(macro_state["CPIAUCSL_z"]),
+    "GDPC1_z": to_py_float(macro_state["GDPC1_z"]),
+    "PCE_z": to_py_float(macro_state["PCE_z"]),
+    "PCEPI_z": to_py_float(macro_state["PCEPI_z"]),
     "UMCSENT_z": to_py_float(macro_state["UMCSENT_z"]),
     "CPI_Event_Active": int(macro_state["CPI_Event_Active"]),
     "NFP_Event_Active": int(macro_state["NFP_Event_Active"]),
@@ -364,9 +370,9 @@ for indicator_id, raw_col in LIVE_MACRO_INDICATORS.items():
         continue
 
     try:
-        macro_state_key = f"{indicator_id}_z"
+        macro_feature_key = f"{indicator_id}_z"
         macro_raw_z = compute_live_macro_zscore(SILVER_HIST, raw_col, observed_value, rt_ts)
-        macro_features[macro_state_key] = to_py_float(macro_raw_z)
+        macro_features[macro_feature_key] = to_py_float(macro_raw_z)
         live_macro_source[indicator_id] = f"live_{live_row['source_provider']}"
         print(
             f"Using live macro value for {indicator_id}: source={live_row['source_provider']} "
@@ -379,11 +385,13 @@ for indicator_id, raw_col in LIVE_MACRO_INDICATORS.items():
     except Exception as exc:
         print(f"Live macro override failed for {indicator_id}: {exc}")
 
-macro_source = (
-    "rt_enrichment_live_recompute+"
-    f"{','.join([k for k, v in live_macro_source.items() if v.startswith('live_')])}"
+applied_live_overrides = sorted(
+    [indicator_id for indicator_id, source_name in live_macro_source.items() if source_name.startswith("live_")]
 )
-if macro_source == "rt_enrichment_live_recompute+":
+macro_source = "rt_enrichment_live_recompute"
+if applied_live_overrides:
+    macro_source = f"{macro_source}+live_macro:{','.join(applied_live_overrides)}"
+else:
     macro_source = "rt_enrichment_live_recompute"
 price_mom_24h = compute_live_price_momentum(rt_ts, spy_close)
 vixcls_z_rt = compute_live_zscore(BRONZE_BT_VIX, "close", vix_close, rt_ts)
@@ -412,14 +420,14 @@ rt_row = {
     "timestamp": rt_ts,
     "SPY_close": to_py_float(spy_close),
     "CPIAUCSL_z": macro_features["CPIAUCSL_z"],
-    "PCEPI_z": to_py_float(macro_state["PCEPI_z"]),
-    "PCE_z": to_py_float(macro_state["PCE_z"]),
+    "PCEPI_z": macro_features["PCEPI_z"],
+    "PCE_z": macro_features["PCE_z"],
     "PAYEMS_z": to_py_float(macro_state["PAYEMS_z"]),
     "UNRATE_z": to_py_float(macro_state["UNRATE_z"]),
-    "GDPC1_z": to_py_float(macro_state["GDPC1_z"]),
+    "GDPC1_z": macro_features["GDPC1_z"],
     "INDPRO_z": to_py_float(macro_state["INDPRO_z"]),
     "UMCSENT_z": macro_features["UMCSENT_z"],
-    # CPI/UMCSENT can be recomputed from latest Finnhub-live macro value.
+    # Phase-1 live overrides are limited to CPI, GDP, PCE, PCEPI, and final-only UMCSENT.
     "VIXCLS_z": to_py_float(vixcls_z_rt),
     "vix3m_z": to_py_float(vix3m_z_rt),
     "VIX_Inversion_Z": to_py_float(vix_inversion_z_rt),
@@ -468,3 +476,17 @@ execute_merge_sql_with_retry(
 
 print(f"RT Silver row written: {rt_ts}")
 spark.sql(f"SELECT * FROM {TARGET_TABLE} ORDER BY timestamp DESC LIMIT 1").show(vertical=True)
+print(
+    f"""
+Validation SQL - RT silver and RT signal
+SELECT timestamp, GDPC1_z, PCE_z, PCEPI_z, source
+FROM {TARGET_TABLE}
+ORDER BY timestamp DESC
+LIMIT 20;
+
+SELECT timestamp, GDPC1_z, PCE_z, PCEPI_z, regime_name, position, model_version
+FROM {CATALOG}.{SCHEMA}.bronze_rt_regime_signal
+ORDER BY timestamp DESC
+LIMIT 20;
+""".strip()
+)
