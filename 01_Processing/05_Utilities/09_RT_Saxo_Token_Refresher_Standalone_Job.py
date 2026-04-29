@@ -7,10 +7,13 @@ import time
 from datetime import datetime, timezone
 
 import requests
+from requests.exceptions import Timeout
 
 TOKEN_STATE_PATH = "dbfs:/Volumes/pawan_quant_research_1/default/saxo/avik_live_token_state.json"
 LOCK_PATH = TOKEN_STATE_PATH + ".lock"
+INCIDENT_MARKER_PATH = TOKEN_STATE_PATH + ".refresh_timeout_incident.json"
 LOCK_TTL_SECONDS = 1800
+REFRESH_TIMEOUT_SECONDS = 45
 
 AUTH_BASE_URL = "https://live.logonvalidation.net"
 TOKEN_URL = f"{AUTH_BASE_URL}/token"
@@ -22,6 +25,12 @@ REDIRECT_URI = "https://localhost/callback"
 
 def load_token():
     return json.loads(dbutils.fs.head(TOKEN_STATE_PATH))
+
+
+def atomic_write_json(path, payload):
+    temp_path = path + ".tmp"
+    dbutils.fs.put(temp_path, json.dumps(payload), overwrite=True)
+    dbutils.fs.mv(temp_path, path, True)
 
 
 def acquire_lock():
@@ -66,6 +75,18 @@ def clear_stale_lock():
         return False
 
 
+def write_timeout_incident_marker(state, error):
+    marker = {
+        "incident_type": "saxo_token_refresh_timeout",
+        "incident_at": datetime.now(timezone.utc).isoformat(),
+        "error_type": type(error).__name__,
+        "token_state_updated_at": state.get("updated_at") or state.get("created_at"),
+        "chain_id": state.get("chain_id"),
+        "source": state.get("source"),
+    }
+    atomic_write_json(INCIDENT_MARKER_PATH, marker)
+
+
 def refresh():
     state = load_token()
     now = time.time()
@@ -75,17 +96,27 @@ def refresh():
         return
 
     print("Refreshing Saxo token...")
-    resp = requests.post(
-        TOKEN_URL,
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": state["refresh_token"],
-            "redirect_uri": REDIRECT_URI,
-        },
-        auth=(CLIENT_ID, CLIENT_SECRET),
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=30,
-    )
+    try:
+        resp = requests.post(
+            TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": state["refresh_token"],
+                "redirect_uri": REDIRECT_URI,
+            },
+            auth=(CLIENT_ID, CLIENT_SECRET),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=REFRESH_TIMEOUT_SECONDS,
+        )
+    except Timeout as exc:
+        try:
+            write_timeout_incident_marker(state, exc)
+        except Exception as marker_exc:
+            print(f"Failed to write timeout incident marker: {type(marker_exc).__name__}")
+        raise RuntimeError(
+            "Token refresh timed out; token state may be ambiguous. "
+            "Run OAuth bootstrap or manual validation before relying on next refresh."
+        ) from exc
 
     if resp.status_code == 401:
         raise RuntimeError("Refresh token invalid — chain broken. Run OAuth bootstrap.")
@@ -105,9 +136,7 @@ def refresh():
         "source": "token_refresher",
     }
 
-    temp_path = TOKEN_STATE_PATH + ".tmp"
-    dbutils.fs.put(temp_path, json.dumps(new_state), overwrite=True)
-    dbutils.fs.mv(temp_path, TOKEN_STATE_PATH, True)
+    atomic_write_json(TOKEN_STATE_PATH, new_state)
     print("Token refreshed successfully")
 
 
