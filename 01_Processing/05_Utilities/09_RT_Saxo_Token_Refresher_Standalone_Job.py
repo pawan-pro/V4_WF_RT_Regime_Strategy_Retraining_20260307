@@ -10,6 +10,7 @@ import requests
 
 TOKEN_STATE_PATH = "dbfs:/Volumes/pawan_quant_research_1/default/saxo/avik_live_token_state.json"
 LOCK_PATH = TOKEN_STATE_PATH + ".lock"
+INCIDENT_PATH = TOKEN_STATE_PATH + ".incident.json"
 LOCK_TTL_SECONDS = 1800
 
 AUTH_BASE_URL = "https://live.logonvalidation.net"
@@ -66,6 +67,28 @@ def clear_stale_lock():
         return False
 
 
+def write_refresh_timeout_incident(exc):
+    incident = {
+        "incident_type": "saxo_token_refresh_timeout",
+        "status": "ambiguous_token_chain_state",
+        "token_state_path": TOKEN_STATE_PATH,
+        "token_url_host": AUTH_BASE_URL,
+        "error_type": type(exc).__name__,
+        "message": (
+            "Saxo refresh POST timed out before a definitive response was received. "
+            "The refresh token may or may not have been consumed by Saxo. "
+            "Canonical token state was not overwritten."
+        ),
+        "action_required": (
+            "Do not retry blindly in a tight loop. Check Saxo auth state and run OAuth "
+            "bootstrap only if the token chain is confirmed broken or the next safe "
+            "refresh attempt fails with an explicit chain-broken response."
+        ),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    dbutils.fs.put(INCIDENT_PATH, json.dumps(incident, indent=2), overwrite=True)
+
+
 def refresh():
     state = load_token()
     now = time.time()
@@ -75,17 +98,30 @@ def refresh():
         return
 
     print("Refreshing Saxo token...")
-    resp = requests.post(
-        TOKEN_URL,
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": state["refresh_token"],
-            "redirect_uri": REDIRECT_URI,
-        },
-        auth=(CLIENT_ID, CLIENT_SECRET),
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=30,
-    )
+    try:
+        resp = requests.post(
+            TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": state["refresh_token"],
+                "redirect_uri": REDIRECT_URI,
+            },
+            auth=(CLIENT_ID, CLIENT_SECRET),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30,
+        )
+    except (
+        requests.exceptions.ReadTimeout,
+        requests.exceptions.ConnectTimeout,
+        requests.exceptions.Timeout,
+    ) as exc:
+        write_refresh_timeout_incident(exc)
+        raise RuntimeError(
+            "Saxo token refresh timed out before a definitive response. "
+            "Token-chain state is ambiguous; canonical token state was not overwritten. "
+            f"Non-secret incident metadata written to {INCIDENT_PATH}. "
+            "Investigate Saxo auth state before retrying or bootstrapping."
+        ) from exc
 
     if resp.status_code == 401:
         raise RuntimeError("Refresh token invalid — chain broken. Run OAuth bootstrap.")
