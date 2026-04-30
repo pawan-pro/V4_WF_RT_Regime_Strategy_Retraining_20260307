@@ -56,6 +56,7 @@ TARGET_EVENT_ALIASES = {
 }
 
 INDICATOR_MATCH_ORDER = ["PCEPI", "GDPC1", "CPIAUCSL", "UMCSENT", "PCE"]
+FINNHUB_CALENDAR_RATE_NOT_LEVEL_INDICATORS = {"PCEPI", "PCE", "GDPC1"}
 
 STATUS_PRIORITY = {
     "observed": 3,
@@ -99,7 +100,9 @@ def infer_release_stage(event_name):
 def infer_validation_status(indicator_id, release_stage, status):
     if status != "observed":
         return "not_checked"
-    if indicator_id in {"CPIAUCSL", "PCEPI", "PCE", "GDPC1"}:
+    if indicator_id in FINNHUB_CALENDAR_RATE_NOT_LEVEL_INDICATORS:
+        return "semantic_blocked_rate_not_level"
+    if indicator_id == "CPIAUCSL":
         return "validated"
     if indicator_id == "UMCSENT":
         if release_stage == "prelim":

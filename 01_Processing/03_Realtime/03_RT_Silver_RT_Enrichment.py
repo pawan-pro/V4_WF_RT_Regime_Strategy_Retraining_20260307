@@ -35,11 +35,31 @@ BRONZE_BT_MACRO_EVENTS = f"{CATALOG}.{SCHEMA}.bronze_bt_macro_events"
 VIX_Z_WINDOW_HOURS = 8760
 PRICE_CONTEXT_HOURS = 72
 LIVE_MACRO_INDICATORS = {
-    "CPIAUCSL": "CPIAUCSL",
-    "UMCSENT": "UMCSENT",
-    "PCEPI": "PCEPI",
-    "PCE": "PCE",
-    "GDPC1": "GDPC1",
+    "CPIAUCSL": {
+        "raw_col": "CPIAUCSL",
+        "enabled": True,
+        "semantic": "level_or_index_compatible",
+    },
+    "UMCSENT": {
+        "raw_col": "UMCSENT",
+        "enabled": True,
+        "semantic": "level_or_index_compatible",
+    },
+    "PCEPI": {
+        "raw_col": "PCEPI",
+        "enabled": False,
+        "semantic": "blocked_finnhub_calendar_percent_not_fred_level",
+    },
+    "PCE": {
+        "raw_col": "PCE",
+        "enabled": False,
+        "semantic": "blocked_finnhub_calendar_percent_not_fred_level",
+    },
+    "GDPC1": {
+        "raw_col": "GDPC1",
+        "enabled": False,
+        "semantic": "blocked_finnhub_calendar_growth_rate_not_fred_level",
+    },
 }
 
 runtime_config = load_runtime_instrument_config(spark)
@@ -440,7 +460,15 @@ macro_features = {
     "NFP_Event_Active": int(macro_state["NFP_Event_Active"]),
 }
 
-for indicator_id, raw_col in LIVE_MACRO_INDICATORS.items():
+for indicator_id, config in LIVE_MACRO_INDICATORS.items():
+    if not config.get("enabled", False):
+        print(
+            f"Skipping live macro override for {indicator_id}: "
+            f"{config.get('semantic')} - using historical silver carry-forward."
+        )
+        continue
+
+    raw_col = config["raw_col"]
     live_row = load_live_macro_level(indicator_id, rt_ts)
     if not live_row:
         print(

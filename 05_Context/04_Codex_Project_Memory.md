@@ -25,7 +25,7 @@ This file exists so future Codex chats can recover the operating context for thi
 
 - Finnhub-first live macro capture flows through `bronze_rt_macro_events_live` and workflow task `rt_01b_macro_events`.
 - Durable guardrail from validation: before `scheduled_release_ts`, live macro rows must stay scheduled-only with null observed fields; the pre-release observation leak was real and is now fixed on that branch.
-- Live macro override Phase 1 expands scope to `PCEPI`, `PCE`, and `GDPC1`, preserving `CPIAUCSL` and final-only `UMCSENT` guardrails.
+- Finnhub calendar rows for `PCEPI`, `PCE`, and `GDPC1` are release-detector/diagnostic only because they are rate/percent values, not FRED/ALFRED level values; they must not override RT silver until a same-semantics level source is implemented.
 - `UMCSENT` live override is final-only; `Michigan Consumer Sentiment Prel` must fall back to historical silver carry-forward.
 
 ## Improved ALFRED Production State
