@@ -214,7 +214,7 @@ else:
     incoming.createOrReplaceTempView("incoming_bt_market_1h")
 
     spark.sql(f"""
-        MERGE INTO delta.`{VOLUME_PATH}` t
+        MERGE INTO {TABLE_NAME} t
         USING incoming_bt_market_1h s
         ON t.symbol = s.symbol
            AND t.timestamp = s.timestamp
