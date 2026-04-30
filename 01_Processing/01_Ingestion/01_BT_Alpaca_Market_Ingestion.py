@@ -17,7 +17,7 @@ dbutils.library.restartPython()
 
 
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, StringType, TimestampType, DoubleType
@@ -36,10 +36,15 @@ ETFS = ["SPY", "QQQ", "MTUM", "USMV", "IQLT", "EFV", "AGG"]
 CREDIT_PROXY = ["HYG"]
 MMF_PROXY = ["BIL","SHV","SGov","PMMF"]
 ALL_TICKERS = ETFS + CREDIT_PROXY + MMF_PROXY
-START_YEAR = 2016 
+REFRESH_MODE = "incremental"  # "incremental" | "full_backfill"
+SAFETY_BUFFER_HOURS = 72
+ALPACA_FREE_TIER_DELAY_MINUTES = 16
+START_YEAR = 2016
 END_YEAR = 2026
 
 print(f"✅ Hourly Ingestion Environment Ready")
+if REFRESH_MODE not in {"incremental", "full_backfill"}:
+    raise ValueError(f"Unsupported REFRESH_MODE={REFRESH_MODE}")
 
 # COMMAND ----------
 
@@ -70,8 +75,6 @@ client = StockHistoricalDataClient(API_KEY, API_SECRET)
 
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 def fetch_hourly_data(symbol_list, year_val):
     start = datetime(year_val, 1, 1, tzinfo=ZoneInfo("UTC"))
@@ -102,6 +105,23 @@ def fetch_hourly_data(symbol_list, year_val):
         print(f"      ⚠️ API Error: {str(e)}")
         return None
 
+def fetch_hourly_data_window(symbol_list, start_dt, end_dt):
+    req = StockBarsRequest(
+        symbol_or_symbols=symbol_list,
+        timeframe=TimeFrame.Hour,
+        start=start_dt,
+        end=end_dt,
+    )
+
+    try:
+        bars = client.get_stock_bars(req)
+        if bars.df is None or bars.df.empty:
+            return None
+        return bars.df.reset_index()
+    except Exception as e:
+        print(f"      ⚠️ API Error: {str(e)}")
+        return None
+
 # Define Schema
 hourly_schema = StructType([
     StructField("symbol", StringType(), False),
@@ -124,46 +144,95 @@ hourly_schema = StructType([
 # COMMAND ----------
 
 # DBTITLE 1,Cell 9
-print(f"🚀 Starting Hourly Ingestion to {VOLUME_PATH}")
+print(f"🚀 Starting Hourly Ingestion to {VOLUME_PATH} | mode={REFRESH_MODE}")
 
-for yr in range(START_YEAR, END_YEAR + 1):
-    print(f"📅 Processing {yr}...", end=" ")
-    
-    pdf = fetch_hourly_data(ALL_TICKERS, yr)
-    
-    if pdf is not None and not pdf.empty:
-        sdf = spark.createDataFrame(pdf, schema=hourly_schema)
-        sdf = (sdf
-            .withColumn("year_partition", F.year("timestamp").cast("integer"))
-            .withColumn("ingestion_ts", F.current_timestamp())
+if REFRESH_MODE == "full_backfill":
+    print("⚠️ full_backfill selected explicitly; appending historical yearly data.")
+    for yr in range(START_YEAR, END_YEAR + 1):
+        print(f"📅 Processing {yr}...", end=" ")
+
+        pdf = fetch_hourly_data(ALL_TICKERS, yr)
+
+        if pdf is not None and not pdf.empty:
+            sdf = spark.createDataFrame(pdf, schema=hourly_schema)
+            sdf = (sdf
+                .withColumn("year_partition", F.year("timestamp").cast("integer"))
+                .withColumn("ingestion_ts", F.current_timestamp())
+            )
+
+            sdf.write.mode("append").format("delta").save(VOLUME_PATH)
+            print(f"✅ {len(pdf)} rows saved.")
+        else:
+            print("⊘ No data.")
+
+    spark.sql(f"DROP VIEW IF EXISTS {TABLE_NAME}")
+    spark.sql(f"""
+        CREATE VIEW {TABLE_NAME}
+        AS SELECT * FROM delta.`{VOLUME_PATH}`
+    """)
+    print("🚀 VIEW CREATED: ALL HOURLY DATA IS LEGIT AND LINKED.")
+    dbutils.notebook.exit("FULL_BACKFILL_COMPLETE")
+
+else:
+    max_ts_row = spark.sql(f"""
+        SELECT MAX(timestamp) AS max_ts
+        FROM {TABLE_NAME}
+    """).collect()[0]
+
+    max_ts = max_ts_row["max_ts"]
+    if max_ts is None:
+        raise ValueError(
+            f"{TABLE_NAME} is empty. Refusing incremental refresh; run explicit full_backfill only."
         )
-        
-        # Save directly to Volume Path
-        sdf.write.mode("append").format("delta").save(VOLUME_PATH)
-        print(f"✅ {len(pdf)} rows saved.")
+
+    if max_ts.tzinfo is None:
+        max_ts = max_ts.replace(tzinfo=timezone.utc)
     else:
-        print("⊘ No data.")
+        max_ts = max_ts.astimezone(timezone.utc)
 
-# Create the table from the Delta location
-#spark.sql(f"""
-#    CREATE TABLE IF NOT EXISTS {TABLE_NAME}
-#    AS SELECT * FROM delta.`{VOLUME_PATH}`
-#""")
-#print("🚀 ALL HOURLY DATA IS LEGIT.")
+    start_dt = max_ts - timedelta(hours=SAFETY_BUFFER_HOURS)
+    end_dt = datetime.now(timezone.utc) - timedelta(minutes=ALPACA_FREE_TIER_DELAY_MINUTES)
 
-# COMMAND ----------
+    if start_dt >= end_dt:
+        print(f"No incremental window available: start={start_dt}, end={end_dt}")
+        dbutils.notebook.exit("NO_INCREMENTAL_WINDOW")
 
-# 1. Drop the old disconnected managed table
-#spark.sql(f"DROP TABLE IF EXISTS {TABLE_NAME}")
-spark.sql(f"DROP VIEW IF EXISTS {TABLE_NAME}")
+    print(f"Incremental market refresh from {start_dt} to {end_dt}")
+    pdf = fetch_hourly_data_window(ALL_TICKERS, start_dt, end_dt)
 
-# 2. Create a dynamic VIEW pointing to the Volume
-spark.sql(f"""
-    CREATE VIEW {TABLE_NAME}
-    AS SELECT * FROM delta.`{VOLUME_PATH}`
-""")
+    if pdf is None or pdf.empty:
+        print("No new incremental market data returned.")
+        dbutils.notebook.exit("NO_NEW_MARKET_DATA")
 
-print("🚀 VIEW CREATED: ALL HOURLY DATA IS LEGIT AND LINKED.")
+    incoming = (
+        spark.createDataFrame(pdf, schema=hourly_schema)
+        .withColumn("year_partition", F.year("timestamp").cast("integer"))
+        .withColumn("ingestion_ts", F.current_timestamp())
+        .dropDuplicates(["symbol", "timestamp"])
+    )
+
+    incoming.createOrReplaceTempView("incoming_bt_market_1h")
+
+    spark.sql(f"""
+        MERGE INTO delta.`{VOLUME_PATH}` t
+        USING incoming_bt_market_1h s
+        ON t.symbol = s.symbol
+           AND t.timestamp = s.timestamp
+        WHEN MATCHED THEN UPDATE SET
+          t.open = s.open,
+          t.high = s.high,
+          t.low = s.low,
+          t.close = s.close,
+          t.volume = s.volume,
+          t.trade_count = s.trade_count,
+          t.vwap = s.vwap,
+          t.year_partition = s.year_partition,
+          t.ingestion_ts = s.ingestion_ts
+        WHEN NOT MATCHED THEN INSERT *
+    """)
+
+    print(f"✅ Incremental MERGE complete for {incoming.count()} deduplicated rows.")
+    dbutils.notebook.exit("INCREMENTAL_MARKET_REFRESH_COMPLETE")
 
 # COMMAND ----------
 
@@ -281,4 +350,3 @@ df = spark.read.format("csv").option("header", True).load(
     "/Volumes/pawan_quant_research_1/v4/market_data/raw_etf_prices_2024-03-01_to_2024-04-30.csv"
 )
 display(df)
-
