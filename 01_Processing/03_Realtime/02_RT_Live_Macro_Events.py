@@ -37,17 +37,25 @@ TARGET_EVENT_ALIASES = {
     "PCEPI": [
         "core pce price index",
         "pce price index",
+        "personal consumption expenditures price index",
+        "pce price index mm",
+        "core pce price index mm",
         "united states consumption core pce price index mm",
     ],
     "PCE": [
         "personal consumption expenditures",
+        "personal spending",
         "united states consumption personal consumption expenditures",
     ],
     "GDPC1": [
         "real gdp",
         "gdp growth rate",
+        "gross domestic product",
+        "real gross domestic product",
     ],
 }
+
+INDICATOR_MATCH_ORDER = ["PCEPI", "GDPC1", "CPIAUCSL", "UMCSENT", "PCE"]
 
 STATUS_PRIORITY = {
     "observed": 3,
@@ -69,8 +77,12 @@ def normalize_text(value):
 
 def canonical_indicator(event_name):
     normalized = normalize_text(event_name)
-    for indicator_id, aliases in TARGET_EVENT_ALIASES.items():
+    # Keep PCE price-index events out of the broader consumption indicator.
+    for indicator_id in INDICATOR_MATCH_ORDER:
+        aliases = TARGET_EVENT_ALIASES[indicator_id]
         if any(normalize_text(alias) in normalized for alias in aliases):
+            if indicator_id == "PCE" and "price index" in normalized:
+                return None
             return indicator_id
     return None
 
@@ -114,12 +126,14 @@ def parse_release_timestamp(raw_timestamp):
     if pd.isna(parsed):
         return None
 
+    # Finnhub economic calendar timestamps are UTC. Naive payload values must
+    # not be localized as New York time or release eligibility is delayed.
     if parsed.tzinfo is None:
-        parsed = parsed.tz_localize(ZoneInfo("America/New_York"))
+        parsed = parsed.tz_localize(ZoneInfo("UTC"))
     else:
-        parsed = parsed.tz_convert(ZoneInfo("America/New_York"))
+        parsed = parsed.tz_convert(ZoneInfo("UTC"))
 
-    return parsed.astimezone(ZoneInfo("UTC")).replace(tzinfo=None).to_pydatetime()
+    return parsed.tz_convert(ZoneInfo("UTC")).replace(tzinfo=None).to_pydatetime()
 
 
 def build_rows_from_calendar(payload):
