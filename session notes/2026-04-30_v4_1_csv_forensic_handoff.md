@@ -269,3 +269,281 @@ Return:
 7. Next smallest action.
 8. Explicit no-production-change confirmation.
 ```
+
+## 8. Updates Since Original Checkpoint - 2026-05-04
+
+This section records the completed follow-on forensic work after the original 2026-04-30 checkpoint. It supersedes the "next recommended task" above, which was completed and then followed by additional reconciliation tasks. The production safety scope remained unchanged.
+
+### 8.1 Raw Macro / Bootstrap / Z-Score Findings
+
+- Raw macro lineage mismatch was ruled out for comparable V4 vs V4.1 rows.
+  - Comparable raw macro release rows matched exactly: `1,000`.
+  - Absolute value difference: `0.0`.
+  - Timestamp difference: `0.0` hours.
+  - Only raw macro difference found: eight V4.1 bootstrap rows dated `2016-01-01`, one per indicator, missing from production raw macro.
+- Bootstrap-row impact was small.
+  - Removing the eight bootstrap rows improved feature match only from about `21.4592%` to `22.4586%`.
+  - Bootstrap rows do not explain the main mismatch.
+- Z-score construction variants also did not explain the feature mismatch.
+  - Tested window lengths, endpoint inclusion/exclusion, sample vs population std, min periods, bootstrap behavior, and backbone variants.
+  - Z-score math changes alone produced negligible improvement.
+- Conclusion at this stage:
+  - Raw macro release-row selection and simple z-score math were not the dominant issue.
+  - Remaining issue was hidden legacy source/logic/cached-artifact lineage.
+
+Key folders:
+
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_1_csv/alfred_event_selector_audit_2026-04-30/`
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_1_csv/bootstrap_row_impact_audit_2026-04-30/`
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_1_csv/zscore_construction_audit_2026-04-30/`
+
+### 8.2 Recovered Code Lineage Diagnosis
+
+- The recovered corrected generator was audited line-by-line.
+- Decisive finding:
+  - The replay runner loaded a cached full-feature-freeze grid CSV and did not rebuild corrected silver from raw data.
+  - The recovered generator used legacy/default data paths and legacy grid semantics:
+    - `first_releases_<indicator>.csv`
+    - macro join clock of `timestamp + 2h`
+    - 24/7 hourly backbone
+    - 24/7 forward-fill
+    - default-schema market/VIX Delta tables
+- VIX/VIX3M source was identified exactly:
+  - `pawan_quant_research_1.default.bronze_bt_vix_1h`
+  - `pawan_quant_research_1.default.bronze_bt_vix3m_1h`
+- V4.1 had used newer FRED daily CSV/PIT expansion for VIX/VIX3M, which explained the VIX raw/source mismatch.
+
+Key folder:
+
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_1_csv/recovered_code_lineage_audit_2026-04-30/`
+
+### 8.3 Legacy Default VIX Source Rebuild
+
+- Default VIX/VIX3M tables were exported read-only to isolated CSVs:
+  - `/Volumes/pawan_quant_research_1/v4/market_data/v4_1_csv/legacy_default_vix_source_rebuild_2026-04-30/inputs/default_bronze_bt_vix_1h.csv`
+  - `/Volumes/pawan_quant_research_1/v4/market_data/v4_1_csv/legacy_default_vix_source_rebuild_2026-04-30/inputs/default_bronze_bt_vix3m_1h.csv`
+- Rebuilding only VIX/VIX3M columns with recovered legacy logic fully matched corrected reference VIX features:
+  - `VIXCLS_z`: `100.0%`
+  - `vix3m_z`: `100.0%`
+  - `VIX_Inversion_Z`: `100.0%`
+- Overall 14-feature match improved:
+  - original non-frozen V4.1: `22.3397%`
+  - non-bootstrap V4.1: `22.4586%`
+  - legacy-default-VIX patched grid: `43.9411%`
+- Verdict:
+  - Legacy default VIX source fully explained the VIX/VIX3M feature mismatch.
+
+Key folder:
+
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_1_csv/legacy_default_vix_source_rebuild_2026-04-30/`
+
+### 8.4 Full Faithful Legacy Grid Clone
+
+- A full faithful legacy-grid clone was built from isolated CSVs using:
+  - default market source
+  - default VIX/VIX3M source
+  - original `first_releases_<indicator>.csv` files
+  - recovered `build_legacy_silver()` semantics exactly
+- Faithful grid:
+  - `/Volumes/pawan_quant_research_1/v4/market_data/v4_1_csv/full_legacy_grid_clone_2026-04-30/grids/full_legacy_grid_clone.csv`
+- Result against corrected reference/full-feature-freeze grid:
+  - Overall 14-feature match: `100.000000%`
+  - All 14 features matched at `100%`
+  - SPY/QQQ close matched `99.998889%`
+  - Candidate grid rows: `89,991`
+  - Reference rows: `90,544`
+  - Inner matched rows: `89,991`
+  - Reference-only timestamps: `553`, because legacy default market source ended at `2026-04-07 14:00:00`
+- Verdict:
+  - Corrected reference features were faithfully reproducible from recovered legacy inputs and recovered legacy grid semantics.
+
+Key folder:
+
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_1_csv/full_legacy_grid_clone_2026-04-30/`
+
+### 8.5 Faithful Legacy Grid Model Replay
+
+- The recovered corrected-generator model replay was run on the 100%-feature-matched faithful grid.
+- Results:
+  - Teacher `full_signal_export` match vs corrected reference: `100.000000%`
+  - Walk-forward signals match vs corrected reference: `100.000000%`
+  - Walk-forward mismatches: `0`
+  - All 14 features on prediction timestamps: `100.000000%`
+- Replay performance from the first replay method:
+  - CAGR: `19.281820%`
+  - Sharpe: `0.794532`
+  - Sortino: `0.922043`
+  - Max DD: `-26.983086%`
+  - Final equity: `$12,067,688.21`
+- Corrected reference performance target:
+  - CAGR: `20.8405%`
+  - Sharpe: `1.0024`
+  - Sortino: `1.3729`
+  - Max DD: `-25.5385%`
+  - Final equity: `$12.883M`
+- Conclusion:
+  - Grid, features, teacher predictions, and walk-forward signals were fully reproduced.
+  - Remaining mismatch was performance methodology / price-path treatment, not model or feature generation.
+
+Key folder:
+
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_1_csv/faithful_legacy_grid_model_replay_2026-04-30/`
+
+### 8.6 Performance Methodology Reconciliation
+
+- The corrected reference `20.8405%` performance was reconciled from the exact matched signal stream.
+- Decisive result:
+  - The reference performance was reproducible when using the corrected reference price/equity methodology rather than the first replay method.
+  - The mismatch was caused by allocation timing / price-path / daily resampling methodology, not signal mismatch.
+- Reconciled conclusion:
+  - Corrected `20.8405%` result can be regenerated from matched signals with the reference methodology.
+  - It remains a retrospective teacher pseudo-label baseline with leakage risk because the signal stream depends on full-sample teacher pseudo-labels.
+  - It should be used as forensic/reference baseline, not strict PIT production baseline.
+
+Key folder:
+
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_1_csv/performance_methodology_reconciliation_2026-04-30/`
+
+### 8.7 FRED VIX/VIX3M Exact Recreation
+
+- The V4 FRED `fred_1d` VIX ingestion logic was recreated and compared row-by-row to legacy default VIX/VIX3M exports.
+- Logic tested:
+  - FRED daily `VIXCLS` / `VXVCLS`
+  - `close.shift(1)`
+  - expand each date to 24 hourly rows
+  - timestamp = normalized date + hour
+  - `VIXCLS -> VX`
+  - `VXVCLS -> VIX3M`
+  - source fields matching V4 notebook semantics
+- Result:
+  - Current FRED V4 logic matched legacy default VIX/VIX3M exactly on overlapping timestamps.
+  - Not file-identical only because current FRED had additional later rows beyond the legacy default snapshot end.
+  - Grid feature match with recreated FRED VIX was about `99.767%`.
+  - Model replay was not run because feature match was below the optional replay threshold.
+- Final VIX answer:
+  - Legacy default VIX is reproducible from current FRED using the exact V4 logic for the overlapping period.
+  - Prior V4.1 mismatch was due to implementation/source-path difference, not unresolved FRED revision mystery.
+
+Key folder:
+
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_1_csv/vix_vix3m_exact_recreation_2026-04-30/`
+
+### 8.8 V4.2 Long-History Data Availability Audit
+
+- A read-only V4.2 data availability audit was run for start-date candidates:
+  - `1996-01-01`
+  - `2006-01-01`
+  - `2010-01-01`
+  - `2016-01-01`
+- Existing V4/default hourly market data:
+  - SPY hourly first timestamp: `2016-01-01 00:00:00`
+  - QQQ hourly first timestamp: `2016-01-01 00:00:00`
+  - No inspected V4/default table or targeted CSV artifact contained SPY/QQQ before 2016.
+- Current FRED volatility availability under V4 `shift(1)` logic:
+  - VIXCLS usable from `1990-01-03`
+  - VXVCLS/VIX3M usable from `2007-12-05`
+- Macro ALFRED feasibility:
+  - Macro first-release reconstruction is feasible for `2006`, `2010`, and `2016`.
+  - `1996` is blocked mainly by PCEPI/UMCSENT vintage availability.
+  - UMCSENT has preliminary/final release-stage ambiguity and needs explicit final-only semantics.
+- Feasibility summary:
+  - Best clean hourly V4.2 start from existing artifacts: `2016-01-01`
+  - Best practical longer-history daily V4.2 start with new external daily SPY/QQQ feed: `2010-01-01`
+  - `1996` blocked by SPY/QQQ, VIX3M, and macro first-release history.
+  - `2006` blocked by SPY/QQQ and VIX3M.
+  - `2010` feasible only as daily with new market data, not hourly from current artifacts.
+
+Key folder:
+
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_2_data_availability_audit_2026-04-30/`
+
+### 8.9 Massive SPY/QQQ Hourly Data Audit
+
+- Massive API key was loaded into Databricks secret:
+  - scope: `massive`
+  - key: `api_key`
+- The key itself is intentionally not written in this note.
+- The Massive hourly SPY/QQQ audit was run under:
+  - `/Volumes/pawan_quant_research_1/v4/market_data/v4_2_hourly_massive_spy_qqq_2007_2026/`
+- Requested range:
+  - `2007-12-05` to `2026-04-30`
+- Key finding:
+  - The current Massive entitlement does not support the requested long-history timeframe.
+  - Massive returned `NOT_AUTHORIZED` for historical chunks including `2007`, `2008`, `2010`, and `2016`.
+  - Error class/message recorded in `forensics/massive_fetch_chunk_status.csv`.
+- Accessible partial data only:
+  - SPY: `4,004` rows, `2024-05-01 08:00:00` to `2026-04-30 23:00:00`
+  - QQQ: `6,302` rows, `2024-05-01 08:00:00` to `2025-11-26 10:00:00`
+  - This is not complete enough for any requested V4.2 long-history hourly baseline.
+- Overlap vs V4 where Massive data exists:
+  - Best session filter: `all_sessions`
+  - Best alignment: `same_timestamp`
+  - No one-hour shift needed.
+  - QQQ same-timestamp MAE: `0.0001206`, near-match rate `99.9365%`
+  - SPY same-timestamp MAE: `0.0004825`, near-match rate `99.6024%`
+- Recommendation:
+  - Massive with the current entitlement cannot support `2007-12-05`, `2008-01-01`, `2010-01-01`, or `2016-01-01` as an hourly start.
+  - To pursue V4.2 hourly long history, upgrade Massive historical access or use a different intraday vendor/backfill.
+  - If a deeper Massive plan is obtained later, use `all_sessions` and `same_timestamp` alignment as the first candidate because it best matches V4 where overlap exists.
+
+Key outputs:
+
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_2_hourly_massive_spy_qqq_2007_2026/inputs/raw/SPY_hourly_massive_2007_2026.csv`
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_2_hourly_massive_spy_qqq_2007_2026/inputs/raw/QQQ_hourly_massive_2007_2026.csv`
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_2_hourly_massive_spy_qqq_2007_2026/inputs/v4_2_market_spy_qqq_1h_massive_2007_2026.csv`
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_2_hourly_massive_spy_qqq_2007_2026/forensics/massive_fetch_chunk_status.csv`
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_2_hourly_massive_spy_qqq_2007_2026/forensics/massive_vs_v4_market_overlap_comparison.csv`
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_2_hourly_massive_spy_qqq_2007_2026/manifests/massive_market_feed_manifest.json`
+
+## 9. Updated Current State
+
+- The original V4.1 corrected-reference mystery is now explained:
+  - Corrected reference features and signals are reproducible exactly from recovered legacy sources and recovered legacy generator semantics.
+  - The original V4.1 CSV rebuild diverged because it used newer/different VIX source handling and did not exactly match the legacy/default market, VIX, macro first-release, join-clock, ffill, event, and cached-artifact lineage.
+- The corrected `20.8405%` result is reproducible as a forensic/reference result, but it is still not a strict PIT production baseline because it depends on full-sample teacher pseudo-label flow.
+- Production V4 remained untouched throughout these forensic/research runs.
+- For strict V4.2:
+  - Clean hourly baseline from existing data remains `2016-01-01`.
+  - Longer daily research baseline around `2010-01-01` is plausible if a clean daily SPY/QQQ feed is added.
+  - Longer hourly baseline around `2007/2008` requires a new/expanded intraday market feed; the tested Massive entitlement is insufficient.
+
+## 10. Updated Next Recommended Task
+
+Do not train models yet.
+
+Recommended next step depends on intended V4.2 direction:
+
+- If staying hourly:
+  - Obtain/approve a market-data source with SPY/QQQ hourly history back to at least `2007-12-05` or `2008-01-01`.
+  - Re-run the Massive audit or equivalent vendor audit.
+  - Require coverage, duplicate/null/gap checks, and overlap alignment against V4 before any grid build.
+- If moving to daily long-history V4.2:
+  - Source daily SPY/QQQ data back to at least `2010-01-01`.
+  - Build a daily strict-PIT feature grid design that uses VIXCLS/VXVCLS and ALFRED macro availability semantics.
+  - Keep it explicitly separate from the legacy V4.1 hourly/reference baseline.
+- If documenting corrected V4.1:
+  - Treat the faithful legacy clone as a forensic reference baseline.
+  - Label the `20.8405%` result as retrospective teacher pseudo-label/reference methodology, not strict production performance.
+
+## 11. Updated Production Safety Statement
+
+No production V4 assets were intentionally changed by the follow-on forensic/research work:
+
+- No production V4 Delta tables were overwritten.
+- No model training was promoted to production.
+- No Saxo execution changed.
+- No Saxo token refresh changed.
+- No RT notebooks changed.
+- No dashboard notebooks changed.
+- No model registry changed.
+- No Databricks production workflows, schedules, or live schedules changed.
+
+One non-production secret-management action was performed for research API access:
+
+- Databricks secret scope/key `massive/api_key` was created/updated so the Massive API key would not be hardcoded into scripts, manifests, logs, or this handoff note.
+
+All forensic outputs were written under isolated research folders:
+
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_1_csv/`
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_2_data_availability_audit_2026-04-30/`
+- `/Volumes/pawan_quant_research_1/v4/market_data/v4_2_hourly_massive_spy_qqq_2007_2026/`
