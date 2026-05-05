@@ -28,6 +28,7 @@ Read this before changing Databricks jobs, Saxo auth, or realtime pipelines in t
 - `v4_saxo_token_refresher` schedule: every 10 minutes
 - `v4_saxo_institutional_dashboard_daily_pdf` schedule: `06:00` daily, `Asia/Singapore`
 - `v4_saxo_institutional_circulation_report_daily_pdf` (`559657131456932`) schedule: `06:00` daily, `Asia/Singapore`; uses `report_variant=circulation` and writes PDF/manifest artifacts under `dbfs:/Volumes/pawan_quant_research_1/v4/market_data/reports/institutional_dashboard/circulation_report/`
+- Avik (`avik@mubama.group`) has job-level `CAN_MANAGE_RUN` access to both institutional dashboard PDF jobs; do not make Avik use Pawan's single-user cluster directly.
 
 ## Compute Constraint
 

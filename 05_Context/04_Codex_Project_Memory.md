@@ -20,6 +20,8 @@ This file exists so future Codex chats can recover the operating context for thi
 - `233851783017472` `v4_saxo_token_refresher`
 - `757971858926245` `V4.1-Token_Refresher_Job_SB` -> must remain paused
 - `516523889858332` `v4_saxo_institutional_dashboard_daily_pdf` -> daily 06:00 Asia/Singapore PDF report job
+- `559657131456932` `v4_saxo_institutional_circulation_report_daily_pdf` -> daily 06:00 Asia/Singapore circulation PDF report job
+- Avik (`avik@mubama.group`) has job-level `CAN_MANAGE_RUN` access to both institutional dashboard PDF jobs. Keep Pawan's single-user cluster `0311-005159-pm2x3pce` unchanged for notebook execution; Avik's supported path is triggering the jobs or using separate dashboard-safe compute.
 
 ## Live Macro Findings To Carry Forward
 
