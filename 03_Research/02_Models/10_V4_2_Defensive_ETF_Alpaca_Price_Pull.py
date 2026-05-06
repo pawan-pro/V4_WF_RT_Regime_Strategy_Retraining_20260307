@@ -357,7 +357,13 @@ def coverage_summary(hourly: pd.DataFrame, price_update_rows: pd.DataFrame) -> t
     ref = price_update_rows[["timestamp"]].copy()
     ref_count = len(ref)
     for symbol in SYMBOLS:
-        sym = hourly[hourly["symbol"].eq(symbol)].copy() if not hourly.empty and "symbol" in hourly.columns else pd.DataFrame()
+        if not hourly.empty and "symbol" in hourly.columns:
+            sym = hourly[hourly["symbol"].eq(symbol)].copy()
+        else:
+            sym = pd.DataFrame(columns=["timestamp", "close"])
+        for col in ["timestamp", "close"]:
+            if col not in sym.columns:
+                sym[col] = pd.Series(dtype="float64")
         row_count = int(len(sym))
         first_ts = sym["timestamp"].min() if row_count else None
         last_ts = sym["timestamp"].max() if row_count else None
