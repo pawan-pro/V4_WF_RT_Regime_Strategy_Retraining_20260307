@@ -844,6 +844,19 @@ def load_defensive_from_grid(grid: pd.DataFrame, ticker: str) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def validated_alpaca_classification(ticker: str) -> str | None:
+    if not DEFENSIVE_PRICE_COVERAGE_PATH.exists():
+        return None
+    try:
+        coverage = pd.read_csv(DEFENSIVE_PRICE_COVERAGE_PATH)
+    except Exception:
+        return None
+    if coverage.empty or "symbol" not in coverage.columns or "classification" not in coverage.columns:
+        return None
+    status = coverage.loc[coverage["symbol"].astype(str).str.upper().eq(ticker), "classification"]
+    return str(status.iloc[0]) if len(status) else None
+
+
 def load_defensive_from_validated_alpaca(ticker: str) -> pd.DataFrame:
     if not DEFENSIVE_PRICE_PATH.exists():
         return pd.DataFrame()
@@ -856,14 +869,9 @@ def load_defensive_from_validated_alpaca(ticker: str) -> pd.DataFrame:
     prices = prices[prices["symbol"].astype(str).str.upper().eq(ticker)].copy()
     if prices.empty:
         return pd.DataFrame()
-    if DEFENSIVE_PRICE_COVERAGE_PATH.exists():
-        try:
-            coverage = pd.read_csv(DEFENSIVE_PRICE_COVERAGE_PATH)
-            status = coverage.loc[coverage["symbol"].astype(str).str.upper().eq(ticker), "classification"]
-            if len(status) and not str(status.iloc[0]).startswith("usable"):
-                return pd.DataFrame()
-        except Exception:
-            pass
+    status = validated_alpaca_classification(ticker)
+    if status and not status.startswith("usable"):
+        return pd.DataFrame()
     return normalize_price_frame(prices, ticker, f"validated_alpaca_csv:{DEFENSIVE_PRICE_PATH}")
 
 
@@ -960,13 +968,17 @@ def load_defensive_prices(grid: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], 
     price_map: dict[str, pd.DataFrame] = {"CASH": pd.DataFrame()}
     coverage_rows = [defensive_coverage(pd.DataFrame(), grid, "CASH", "zero_return_cash")]
     for ticker in DEFENSIVE_TICKERS:
+        validated_status = validated_alpaca_classification(ticker)
         prices = load_defensive_from_grid(grid, ticker)
         if prices.empty:
             prices = load_defensive_from_validated_alpaca(ticker)
-        if prices.empty:
+        if prices.empty and (validated_status is None or validated_status.startswith("usable")):
             prices = load_defensive_from_tables(ticker)
         source = str(prices["source"].iloc[0]) if not prices.empty and "source" in prices.columns else ""
         cov = defensive_coverage(prices, grid, ticker, source)
+        if prices.empty and validated_status and not validated_status.startswith("usable"):
+            cov["source"] = str(DEFENSIVE_PRICE_COVERAGE_PATH)
+            cov["reason"] = f"validated Alpaca classification {validated_status}; excluded from fallback"
         coverage_rows.append(cov)
         if cov["included"]:
             price_map[ticker] = prices[["timestamp", "defensive_close"]].copy()
