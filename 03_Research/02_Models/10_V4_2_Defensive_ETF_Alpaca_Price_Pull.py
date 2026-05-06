@@ -175,6 +175,10 @@ def get_alpaca_credentials() -> tuple[str | None, str | None, list[str]]:
     except Exception:
         api_secret = None
         missing.append(f"{SECRET_SCOPE}/{SECRET_KEYS['api_secret']}")
+    if isinstance(api_key, str):
+        api_key = api_key.strip()
+    if isinstance(api_secret, str):
+        api_secret = api_secret.strip()
     return api_key, api_secret, missing
 
 
@@ -314,8 +318,7 @@ def fetch_bars(client, symbols: list[str], start: pd.Timestamp, end: pd.Timestam
                         )
                     else:
                         time.sleep(2**attempt)
-    if errors:
-        write_csv(pd.DataFrame(errors), COVERAGE_DIR / "alpaca_fetch_errors.csv")
+    write_csv(pd.DataFrame(errors, columns=["symbol", "chunk_start", "chunk_end", "fetch_error"]), COVERAGE_DIR / "alpaca_fetch_errors.csv")
     if not frames:
         return pd.DataFrame()
     raw = pd.concat(frames, ignore_index=True)
