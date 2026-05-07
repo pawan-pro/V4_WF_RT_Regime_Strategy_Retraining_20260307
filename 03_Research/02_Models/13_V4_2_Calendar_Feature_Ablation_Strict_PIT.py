@@ -690,8 +690,8 @@ def feature_inventory() -> pd.DataFrame:
 def plot_cagr_drawdown(summary: pd.DataFrame) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.scatter(summary["Max DD"], summary["CAGR"], s=90)
-    for row in summary.itertuples(index=False):
-        ax.annotate(row.feature_set, (row._asdict()["Max DD"], row.CAGR), fontsize=8, xytext=(4, 4), textcoords="offset points")
+    for _, row in summary.iterrows():
+        ax.annotate(row["feature_set"], (row["Max DD"], row["CAGR"]), fontsize=8, xytext=(4, 4), textcoords="offset points")
     ax.axhline(SPY_CAGR, color="black", linestyle="--", linewidth=1.0, label="SPY CAGR")
     ax.axhline(B_C2_CAGR, color="tab:red", linestyle=":", linewidth=1.0, label="B/C2 CAGR")
     ax.set_title("Calendar Feature Ablation: CAGR vs Max Drawdown")
