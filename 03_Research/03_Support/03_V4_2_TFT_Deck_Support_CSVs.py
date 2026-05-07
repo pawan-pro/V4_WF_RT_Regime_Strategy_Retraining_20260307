@@ -22,6 +22,7 @@ import json
 import math
 import os
 import platform
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -391,7 +392,11 @@ def write_excel_package(outputs: dict[str, pd.DataFrame]) -> Path | None:
     path = OUTPUT_ROOT / "v4_2_tft_deck_support.xlsx"
     assert_output_path(path)
     try:
-        with pd.ExcelWriter(path) as writer:
+        try:
+            import openpyxl  # noqa: F401
+        except Exception:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "openpyxl"])
+        with pd.ExcelWriter(path, engine="openpyxl") as writer:
             for sheet, df in outputs.items():
                 df.to_excel(writer, sheet_name=sheet[:31], index=False)
         return path
