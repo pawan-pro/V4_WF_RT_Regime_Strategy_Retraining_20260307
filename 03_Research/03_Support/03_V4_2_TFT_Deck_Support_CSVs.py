@@ -24,6 +24,7 @@ import os
 import platform
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -396,9 +397,17 @@ def write_excel_package(outputs: dict[str, pd.DataFrame]) -> Path | None:
             import openpyxl  # noqa: F401
         except Exception:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "openpyxl"])
-        with pd.ExcelWriter(path, engine="openpyxl") as writer:
-            for sheet, df in outputs.items():
-                df.to_excel(writer, sheet_name=sheet[:31], index=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir) / path.name
+            with pd.ExcelWriter(tmp_path, engine="openpyxl") as writer:
+                for sheet, df in outputs.items():
+                    df.to_excel(writer, sheet_name=sheet[:31], index=False)
+            if tmp_path.stat().st_size < 10_000:
+                raise ValueError(f"Generated workbook is unexpectedly small: {tmp_path.stat().st_size} bytes")
+            path.write_bytes(tmp_path.read_bytes())
+        error_path = OUTPUT_ROOT / "excel_generation_error.txt"
+        if error_path.exists():
+            error_path.unlink()
         return path
     except Exception as exc:
         write_text(f"Excel package was not created because pandas ExcelWriter failed: {exc}\n", "excel_generation_error.txt")
