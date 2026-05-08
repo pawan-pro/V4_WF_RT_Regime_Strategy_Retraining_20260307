@@ -30,12 +30,36 @@ BRONZE_BT_VIX = f"{CATALOG}.{SCHEMA}.bronze_bt_vix_1h"
 BRONZE_BT_VIX3M = f"{CATALOG}.{SCHEMA}.bronze_bt_vix3m_1h"
 BRONZE_RT_VIX = f"{CATALOG}.{SCHEMA}.bronze_rt_vix_1d"
 LIVE_MACRO_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_macro_events_live"
+BRONZE_BT_MACRO_EVENTS = f"{CATALOG}.{SCHEMA}.bronze_bt_macro_events"
 
 VIX_Z_WINDOW_HOURS = 8760
 PRICE_CONTEXT_HOURS = 72
 LIVE_MACRO_INDICATORS = {
-    "CPIAUCSL": "CPIAUCSL",
-    "UMCSENT": "UMCSENT",
+    "CPIAUCSL": {
+        "raw_col": "CPIAUCSL",
+        "enabled": True,
+        "semantic": "level_or_index_compatible",
+    },
+    "UMCSENT": {
+        "raw_col": "UMCSENT",
+        "enabled": True,
+        "semantic": "level_or_index_compatible",
+    },
+    "PCEPI": {
+        "raw_col": "PCEPI",
+        "enabled": False,
+        "semantic": "blocked_finnhub_calendar_percent_not_fred_level",
+    },
+    "PCE": {
+        "raw_col": "PCE",
+        "enabled": False,
+        "semantic": "blocked_finnhub_calendar_percent_not_fred_level",
+    },
+    "GDPC1": {
+        "raw_col": "GDPC1",
+        "enabled": False,
+        "semantic": "blocked_finnhub_calendar_growth_rate_not_fred_level",
+    },
 }
 
 runtime_config = load_runtime_instrument_config(spark)
@@ -170,6 +194,7 @@ def load_live_macro_level(indicator_id, rt_ts):
     rows = spark.sql(
         f"""
         SELECT
+            provider_event_name,
             observed_value,
             status,
             source_provider,
@@ -180,6 +205,7 @@ def load_live_macro_level(indicator_id, rt_ts):
         WHERE indicator_id = '{indicator_id}'
           AND observed_value IS NOT NULL
           AND status IN ('observed', 'reconciled_observed')
+          AND validation_status = 'validated'
           {gating_filter}
           AND scheduled_release_ts <= TIMESTAMP('{rt_ts}')
         ORDER BY scheduled_release_ts DESC, ingestion_ts DESC
@@ -191,7 +217,7 @@ def load_live_macro_level(indicator_id, rt_ts):
     return rows[0]
 
 
-def compute_live_macro_zscore(table_name, value_column, current_value, rt_ts):
+def compute_live_macro_zscore_from_silver(table_name, value_column, current_value, rt_ts):
     history_pdf = spark.sql(
         f"""
         SELECT timestamp, {value_column} AS value
@@ -216,6 +242,83 @@ def compute_live_macro_zscore(table_name, value_column, current_value, rt_ts):
     if math.isnan(std_val) or std_val == 0.0:
         return 0.0
     return (float(current_value) - mean_val) / std_val
+
+
+def bronze_macro_value_column():
+    columns = existing_columns(BRONZE_BT_MACRO_EVENTS)
+    if "actual" in columns:
+        return "actual"
+    if "observed_value" in columns:
+        return "observed_value"
+    raise ValueError(f"Unsupported schema for {BRONZE_BT_MACRO_EVENTS}: expected actual or observed_value")
+
+
+def compute_live_macro_zscore_from_bronze(indicator_id, current_value, rt_ts):
+    value_column = bronze_macro_value_column()
+    history_start = pd.Timestamp(rt_ts) - pd.Timedelta(hours=VIX_Z_WINDOW_HOURS - 1)
+    history_pdf = spark.sql(
+        f"""
+        WITH hourly_grid AS (
+            SELECT explode(sequence(
+                TIMESTAMP('{history_start}'),
+                TIMESTAMP('{rt_ts}') - INTERVAL 1 HOUR,
+                INTERVAL 1 HOUR
+            )) AS grid_ts
+        ),
+        macro_releases AS (
+            SELECT
+                timestamp + INTERVAL 2 HOURS AS available_ts,
+                {value_column} AS value
+            FROM {BRONZE_BT_MACRO_EVENTS}
+            WHERE indicator_id = '{indicator_id}'
+              AND {value_column} IS NOT NULL
+              AND timestamp + INTERVAL 2 HOURS <= TIMESTAMP('{rt_ts}')
+        ),
+        asof_values AS (
+            SELECT
+                g.grid_ts AS timestamp,
+                m.value,
+                ROW_NUMBER() OVER (
+                    PARTITION BY g.grid_ts
+                    ORDER BY m.available_ts DESC
+                ) AS rn
+            FROM hourly_grid g
+            LEFT JOIN macro_releases m
+              ON m.available_ts <= g.grid_ts
+        )
+        SELECT timestamp, value
+        FROM asof_values
+        WHERE rn = 1
+          AND value IS NOT NULL
+        ORDER BY timestamp ASC
+        """
+    ).toPandas()
+
+    if history_pdf.empty:
+        raise ValueError(f"Insufficient PIT history in {BRONZE_BT_MACRO_EVENTS} to compute {indicator_id} z-score")
+
+    values = history_pdf["value"].astype(float).tolist()
+    values.append(float(current_value))
+
+    series = pd.Series(values, dtype="float64")
+    mean_val = float(series.mean())
+    std_val = float(series.std(ddof=1)) if len(series) > 1 else 0.0
+    if math.isnan(std_val) or std_val == 0.0:
+        return 0.0
+    return (float(current_value) - mean_val) / std_val
+
+
+def compute_live_macro_zscore(indicator_id, value_column, current_value, rt_ts):
+    silver_columns = existing_columns(SILVER_HIST)
+    if value_column in silver_columns:
+        print(f"Live macro z-score history for {indicator_id}: using {SILVER_HIST}.{value_column}")
+        return compute_live_macro_zscore_from_silver(SILVER_HIST, value_column, current_value, rt_ts)
+
+    print(
+        f"Live macro z-score history for {indicator_id}: {value_column} not found in {SILVER_HIST}; "
+        f"using PIT reconstruction from {BRONZE_BT_MACRO_EVENTS}"
+    )
+    return compute_live_macro_zscore_from_bronze(indicator_id, current_value, rt_ts)
 
 
 def load_market_history(rt_ts, lookback_hours):
@@ -346,38 +449,76 @@ ensure_target_table()
 
 rt_ts, spy_close, vix_close, vix3m_close, vix_latest_date = load_latest_rt_inputs()
 macro_state = load_macro_state(rt_ts)
-live_macro_source = {"CPIAUCSL": "bt_silver", "UMCSENT": "bt_silver"}
+live_macro_source = {indicator_id: "bt_silver" for indicator_id in LIVE_MACRO_INDICATORS}
 macro_features = {
     "CPIAUCSL_z": to_py_float(macro_state["CPIAUCSL_z"]),
+    "PCEPI_z": to_py_float(macro_state["PCEPI_z"]),
+    "PCE_z": to_py_float(macro_state["PCE_z"]),
+    "GDPC1_z": to_py_float(macro_state["GDPC1_z"]),
     "UMCSENT_z": to_py_float(macro_state["UMCSENT_z"]),
     "CPI_Event_Active": int(macro_state["CPI_Event_Active"]),
     "NFP_Event_Active": int(macro_state["NFP_Event_Active"]),
 }
 
-for indicator_id, raw_col in LIVE_MACRO_INDICATORS.items():
+for indicator_id, config in LIVE_MACRO_INDICATORS.items():
+    if not config.get("enabled", False):
+        print(
+            f"Skipping live macro override for {indicator_id}: "
+            f"{config.get('semantic')} - using historical silver carry-forward."
+        )
+        continue
+
+    raw_col = config["raw_col"]
     live_row = load_live_macro_level(indicator_id, rt_ts)
     if not live_row:
+        print(
+            f"Live macro override skipped | indicator_id={indicator_id} "
+            "provider_event_name=N/A source_provider=N/A status=N/A "
+            "release_stage=N/A validation_status=N/A scheduled_release_ts=N/A "
+            "observed_value=N/A z_score=N/A reason=no_valid_observed_live_row"
+        )
         continue
 
     observed_value = to_py_float(live_row["observed_value"])
     if observed_value is None:
+        print(
+            f"Live macro override skipped | indicator_id={indicator_id} "
+            f"provider_event_name={live_row['provider_event_name']} "
+            f"source_provider={live_row['source_provider']} "
+            f"status={live_row['status']} "
+            f"release_stage={live_row['release_stage']} "
+            f"validation_status={live_row['validation_status']} "
+            f"scheduled_release_ts={live_row['scheduled_release_ts']} "
+            "observed_value=N/A z_score=N/A reason=missing_observed_value"
+        )
         continue
 
     try:
         macro_state_key = f"{indicator_id}_z"
-        macro_raw_z = compute_live_macro_zscore(SILVER_HIST, raw_col, observed_value, rt_ts)
+        macro_raw_z = compute_live_macro_zscore(indicator_id, raw_col, observed_value, rt_ts)
         macro_features[macro_state_key] = to_py_float(macro_raw_z)
         live_macro_source[indicator_id] = f"live_{live_row['source_provider']}"
         print(
-            f"Using live macro value for {indicator_id}: source={live_row['source_provider']} "
+            f"Live macro override applied | indicator_id={indicator_id} "
+            f"provider_event_name={live_row['provider_event_name']} "
+            f"source_provider={live_row['source_provider']} "
             f"status={live_row['status']} "
             f"release_stage={live_row['release_stage']} "
             f"validation_status={live_row['validation_status']} "
-            f"scheduled_release={live_row['scheduled_release_ts']} "
-            f"value={observed_value} z={macro_raw_z:.6f}"
+            f"scheduled_release_ts={live_row['scheduled_release_ts']} "
+            f"observed_value={observed_value} z_score={macro_raw_z:.6f}"
         )
     except Exception as exc:
-        print(f"Live macro override failed for {indicator_id}: {exc}")
+        print(
+            f"Live macro override skipped | indicator_id={indicator_id} "
+            f"provider_event_name={live_row['provider_event_name']} "
+            f"source_provider={live_row['source_provider']} "
+            f"status={live_row['status']} "
+            f"release_stage={live_row['release_stage']} "
+            f"validation_status={live_row['validation_status']} "
+            f"scheduled_release_ts={live_row['scheduled_release_ts']} "
+            f"observed_value={observed_value} z_score=N/A reason={exc}"
+        )
 
 macro_source = (
     "rt_enrichment_live_recompute+"
@@ -412,14 +553,14 @@ rt_row = {
     "timestamp": rt_ts,
     "SPY_close": to_py_float(spy_close),
     "CPIAUCSL_z": macro_features["CPIAUCSL_z"],
-    "PCEPI_z": to_py_float(macro_state["PCEPI_z"]),
-    "PCE_z": to_py_float(macro_state["PCE_z"]),
+    "PCEPI_z": macro_features["PCEPI_z"],
+    "PCE_z": macro_features["PCE_z"],
     "PAYEMS_z": to_py_float(macro_state["PAYEMS_z"]),
     "UNRATE_z": to_py_float(macro_state["UNRATE_z"]),
-    "GDPC1_z": to_py_float(macro_state["GDPC1_z"]),
+    "GDPC1_z": macro_features["GDPC1_z"],
     "INDPRO_z": to_py_float(macro_state["INDPRO_z"]),
     "UMCSENT_z": macro_features["UMCSENT_z"],
-    # CPI/UMCSENT can be recomputed from latest Finnhub-live macro value.
+    # Phase 1 live macro overrides can recompute selected macro z-scores from validated Finnhub-live values.
     "VIXCLS_z": to_py_float(vixcls_z_rt),
     "vix3m_z": to_py_float(vix3m_z_rt),
     "VIX_Inversion_Z": to_py_float(vix_inversion_z_rt),
