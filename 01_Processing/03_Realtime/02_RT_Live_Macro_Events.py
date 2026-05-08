@@ -19,7 +19,7 @@ TARGET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_macro_events_live"
 
 FINNHUB_API_KEY = "d5s3pchr01qoo9r2f3h0d5s3pchr01qoo9r2f3hg"
 
-TARGET_INDICATORS = {"CPIAUCSL", "UMCSENT"}
+TARGET_INDICATORS = {"CPIAUCSL", "UMCSENT", "PCEPI", "PCE", "GDPC1"}
 TARGET_EVENT_ALIASES = {
     "CPIAUCSL": [
         "consumer price index (cpi)",
@@ -34,7 +34,29 @@ TARGET_EVENT_ALIASES = {
         "consumer sentiment",
         "u mich",
     ],
+    "PCEPI": [
+        "core pce price index",
+        "pce price index",
+        "personal consumption expenditures price index",
+        "pce price index mm",
+        "core pce price index mm",
+        "united states consumption core pce price index mm",
+    ],
+    "PCE": [
+        "personal consumption expenditures",
+        "personal spending",
+        "united states consumption personal consumption expenditures",
+    ],
+    "GDPC1": [
+        "real gdp",
+        "gdp growth rate",
+        "gross domestic product",
+        "real gross domestic product",
+    ],
 }
+
+INDICATOR_MATCH_ORDER = ["PCEPI", "GDPC1", "CPIAUCSL", "UMCSENT", "PCE"]
+FINNHUB_CALENDAR_RATE_NOT_LEVEL_INDICATORS = {"PCEPI", "PCE", "GDPC1"}
 
 STATUS_PRIORITY = {
     "observed": 3,
@@ -56,8 +78,12 @@ def normalize_text(value):
 
 def canonical_indicator(event_name):
     normalized = normalize_text(event_name)
-    for indicator_id, aliases in TARGET_EVENT_ALIASES.items():
-        if any(alias in normalized for alias in aliases):
+    # Keep PCE price-index events out of the broader consumption indicator.
+    for indicator_id in INDICATOR_MATCH_ORDER:
+        aliases = TARGET_EVENT_ALIASES[indicator_id]
+        if any(normalize_text(alias) in normalized for alias in aliases):
+            if indicator_id == "PCE" and "price index" in normalized:
+                return None
             return indicator_id
     return None
 
@@ -74,6 +100,8 @@ def infer_release_stage(event_name):
 def infer_validation_status(indicator_id, release_stage, status):
     if status != "observed":
         return "not_checked"
+    if indicator_id in FINNHUB_CALENDAR_RATE_NOT_LEVEL_INDICATORS:
+        return "semantic_blocked_rate_not_level"
     if indicator_id == "CPIAUCSL":
         return "validated"
     if indicator_id == "UMCSENT":
@@ -101,12 +129,14 @@ def parse_release_timestamp(raw_timestamp):
     if pd.isna(parsed):
         return None
 
+    # Finnhub economic calendar timestamps are UTC. Naive payload values must
+    # not be localized as New York time or release eligibility is delayed.
     if parsed.tzinfo is None:
-        parsed = parsed.tz_localize(ZoneInfo("America/New_York"))
+        parsed = parsed.tz_localize(ZoneInfo("UTC"))
     else:
-        parsed = parsed.tz_convert(ZoneInfo("America/New_York"))
+        parsed = parsed.tz_convert(ZoneInfo("UTC"))
 
-    return parsed.astimezone(ZoneInfo("UTC")).replace(tzinfo=None).to_pydatetime()
+    return parsed.tz_convert(ZoneInfo("UTC")).replace(tzinfo=None).to_pydatetime()
 
 
 def build_rows_from_calendar(payload):
@@ -242,7 +272,7 @@ res = client.calendar_economic(_from=str(window_start), to=str(window_end))
 rows = build_rows_from_calendar(res)
 
 if not rows:
-    print("No CPI/UMCSENT calendar rows found for live window")
+    print("No target macro calendar rows found for live window")
     dbutils.notebook.exit("NO_NEW_CORE_MACRO_EVENTS")
 
 macro_df = pd.DataFrame(rows)
@@ -293,7 +323,7 @@ latest_schedule = spark.sql(
            release_stage,
            validation_status
     FROM {TARGET_TABLE}
-    WHERE indicator_id IN ('CPIAUCSL', 'UMCSENT')
+    WHERE indicator_id IN ('CPIAUCSL', 'UMCSENT', 'PCEPI', 'PCE', 'GDPC1')
     ORDER BY scheduled_release_ts DESC, indicator_id
     """
 ).show(truncate=False)
