@@ -34,11 +34,19 @@ BRONZE_BT_MACRO_EVENTS = f"{CATALOG}.{SCHEMA}.bronze_bt_macro_events"
 
 VIX_Z_WINDOW_HOURS = 8760
 PRICE_CONTEXT_HOURS = 72
+PAYEMS_MIN_LEVEL = 100000.0
+PAYEMS_MAX_LEVEL = 250000.0
+NFP_EVENT_WINDOW_HOURS = 48
 LIVE_MACRO_INDICATORS = {
     "CPIAUCSL": {
         "raw_col": "CPIAUCSL",
         "enabled": True,
         "semantic": "level_or_index_compatible",
+    },
+    "PAYEMS": {
+        "raw_col": "PAYEMS",
+        "enabled": True,
+        "semantic": "alfred_first_release_raw_level",
     },
     "UMCSENT": {
         "raw_col": "UMCSENT",
@@ -190,6 +198,12 @@ def load_live_macro_level(indicator_id, rt_ts):
             "AND release_stage = 'final' "
             "AND validation_status = 'validated' "
         )
+    elif indicator_id == "PAYEMS":
+        gating_filter = (
+            "AND validation_status = 'validated' "
+            "AND reconciled_with_alfred = true "
+            "AND lower(source_provider) IN ('alfred', 'fred_alfred') "
+        )
 
     rows = spark.sql(
         f"""
@@ -198,6 +212,7 @@ def load_live_macro_level(indicator_id, rt_ts):
             observed_value,
             status,
             source_provider,
+            reconciled_with_alfred,
             release_stage,
             validation_status,
             scheduled_release_ts
@@ -215,6 +230,21 @@ def load_live_macro_level(indicator_id, rt_ts):
     if not rows:
         return None
     return rows[0]
+
+
+def payems_level_is_plausible(value):
+    if value is None:
+        return False
+    return PAYEMS_MIN_LEVEL <= float(value) <= PAYEMS_MAX_LEVEL
+
+
+def nfp_event_active_for_release(rt_ts, scheduled_release_ts):
+    if scheduled_release_ts is None:
+        return 0
+    elapsed = rt_ts - scheduled_release_ts
+    if elapsed.total_seconds() < 0:
+        return 0
+    return int(elapsed <= timedelta(hours=NFP_EVENT_WINDOW_HOURS))
 
 
 def compute_live_macro_zscore_from_silver(table_name, value_column, current_value, rt_ts):
@@ -454,6 +484,7 @@ macro_features = {
     "CPIAUCSL_z": to_py_float(macro_state["CPIAUCSL_z"]),
     "PCEPI_z": to_py_float(macro_state["PCEPI_z"]),
     "PCE_z": to_py_float(macro_state["PCE_z"]),
+    "PAYEMS_z": to_py_float(macro_state["PAYEMS_z"]),
     "GDPC1_z": to_py_float(macro_state["GDPC1_z"]),
     "UMCSENT_z": to_py_float(macro_state["UMCSENT_z"]),
     "CPI_Event_Active": int(macro_state["CPI_Event_Active"]),
@@ -480,6 +511,20 @@ for indicator_id, config in LIVE_MACRO_INDICATORS.items():
         continue
 
     observed_value = to_py_float(live_row["observed_value"])
+    if indicator_id == "PAYEMS" and not payems_level_is_plausible(observed_value):
+        print(
+            f"Live macro override skipped | indicator_id={indicator_id} "
+            f"provider_event_name={live_row['provider_event_name']} "
+            f"source_provider={live_row['source_provider']} "
+            f"status={live_row['status']} "
+            f"release_stage={live_row['release_stage']} "
+            f"validation_status={live_row['validation_status']} "
+            f"scheduled_release_ts={live_row['scheduled_release_ts']} "
+            f"observed_value={observed_value} z_score=N/A "
+            "reason=payems_value_not_raw_level"
+        )
+        continue
+
     if observed_value is None:
         print(
             f"Live macro override skipped | indicator_id={indicator_id} "
@@ -498,6 +543,11 @@ for indicator_id, config in LIVE_MACRO_INDICATORS.items():
         macro_raw_z = compute_live_macro_zscore(indicator_id, raw_col, observed_value, rt_ts)
         macro_features[macro_state_key] = to_py_float(macro_raw_z)
         live_macro_source[indicator_id] = f"live_{live_row['source_provider']}"
+        if indicator_id == "PAYEMS":
+            macro_features["NFP_Event_Active"] = nfp_event_active_for_release(
+                rt_ts,
+                live_row["scheduled_release_ts"],
+            )
         print(
             f"Live macro override applied | indicator_id={indicator_id} "
             f"provider_event_name={live_row['provider_event_name']} "
@@ -555,7 +605,7 @@ rt_row = {
     "CPIAUCSL_z": macro_features["CPIAUCSL_z"],
     "PCEPI_z": macro_features["PCEPI_z"],
     "PCE_z": macro_features["PCE_z"],
-    "PAYEMS_z": to_py_float(macro_state["PAYEMS_z"]),
+    "PAYEMS_z": macro_features["PAYEMS_z"],
     "UNRATE_z": to_py_float(macro_state["UNRATE_z"]),
     "GDPC1_z": macro_features["GDPC1_z"],
     "INDPRO_z": to_py_float(macro_state["INDPRO_z"]),
