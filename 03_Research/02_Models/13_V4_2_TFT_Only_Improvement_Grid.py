@@ -1537,7 +1537,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stage-b-top-n", type=int, default=STAGE_B_TOP_N, help="Top Stage A base configs to carry into five-seed Stage B.")
     parser.add_argument("--max-stage-a-specs", type=int, default=None, help="Optional debug cap for Stage A model specs.")
     parser.add_argument("--max-stage-b-specs", type=int, default=None, help="Optional debug cap for Stage B model specs.")
-    return parser.parse_args()
+    args, _unknown = parser.parse_known_args()
+    return args
 
 
 def main() -> None:
