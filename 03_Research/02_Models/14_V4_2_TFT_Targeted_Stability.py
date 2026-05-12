@@ -254,7 +254,15 @@ def md_table(df: pd.DataFrame, max_rows: int = 20) -> str:
     if df.empty:
         return "_No rows._"
     view = df.head(max_rows).copy()
-    return view.to_markdown(index=False)
+    try:
+        return view.to_markdown(index=False)
+    except ImportError:
+        cols = [str(c) for c in view.columns]
+        lines = ["| " + " | ".join(cols) + " |", "| " + " | ".join(["---"] * len(cols)) + " |"]
+        for row in view.itertuples(index=False):
+            vals = [str(v) for v in row]
+            lines.append("| " + " | ".join(vals) + " |")
+        return "\n".join(lines)
 
 
 def monthly_folds() -> list[tuple[pd.Timestamp, pd.Timestamp]]:
