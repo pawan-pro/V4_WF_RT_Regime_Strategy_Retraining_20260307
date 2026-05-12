@@ -1577,12 +1577,15 @@ def write_input_hashes(grid: pd.DataFrame, ref: pd.DataFrame, bil_meta: dict[str
 
 def write_readme_checkpoint(summary: pd.DataFrame, stability: pd.DataFrame, spy_row: dict[str, Any], xgb_available: bool) -> None:
     accepted = stability[stability["accepted"].eq(True)] if not stability.empty else pd.DataFrame()
-    top = summary[
-        summary["annual_financing_rate"].eq(HEADLINE_FINANCING_RATE)
-        & summary["result_type"].isin(["single_seed", "ensemble"])
-        & summary["Max DD"].ge(MAX_ACCEPTED_DRAWDOWN)
-        & ~summary["breached_zero"]
-    ].sort_values(["Sharpe", "CAGR"], ascending=False).head(10)
+    if summary.empty:
+        top = pd.DataFrame()
+    else:
+        top = summary[
+            summary["annual_financing_rate"].eq(HEADLINE_FINANCING_RATE)
+            & summary["result_type"].isin(["single_seed", "ensemble"])
+            & summary["Max DD"].ge(MAX_ACCEPTED_DRAWDOWN)
+            & ~summary["breached_zero"]
+        ].sort_values(["Sharpe", "CAGR"], ascending=False).head(10)
     lines = [
         "# MUB-27 V4.2 Targeted TFT Stability",
         "",
