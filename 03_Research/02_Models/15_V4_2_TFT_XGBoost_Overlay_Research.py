@@ -1414,6 +1414,7 @@ def overlay_targets(joined: pd.DataFrame, policy_name: str, params: dict[str, An
 def overlay_daily(grid: pd.DataFrame, overlay_signals: pd.DataFrame, bil_prices: pd.DataFrame) -> pd.DataFrame:
     cols = [
         "timestamp", "variant", "base_variant", "tft_source", "tft_source_type", "seed", "xgb_predicted_regime",
+        "sequence_window_hours", "drawdown_threshold", "return_threshold",
         "predicted_regime", "prob_expansion", "prob_slowdown", "prob_recession", "confidence", "overlay_policy",
         "overlay_params", "target_asset_signal", "allocation_scale", "overlay_daily_leverage_signal",
     ]
