@@ -1115,7 +1115,19 @@ def write_input_hashes(grid: pd.DataFrame, bil_meta: dict[str, Any], prior: pd.D
 def md_table(df: pd.DataFrame, max_rows: int = 10) -> str:
     if df is None or df.empty:
         return "_None_"
-    return df.head(max_rows).to_markdown(index=False)
+    view = df.head(max_rows).copy()
+    columns = [str(c) for c in view.columns]
+    lines = ["| " + " | ".join(columns) + " |", "| " + " | ".join(["---"] * len(columns)) + " |"]
+    for row in view.itertuples(index=False, name=None):
+        values = []
+        for value in row:
+            if isinstance(value, float):
+                values.append("" if math.isnan(value) else f"{value:.6g}")
+            else:
+                text = "" if pd.isna(value) else str(value)
+                values.append(text.replace("\n", " ").replace("|", "\\|"))
+        lines.append("| " + " | ".join(values) + " |")
+    return "\n".join(lines)
 
 
 def write_readme(summary: pd.DataFrame, rankings: pd.DataFrame, meta: pd.DataFrame, spy_row: dict[str, Any], xgb_row: dict[str, Any] | None) -> None:
