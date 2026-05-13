@@ -1037,10 +1037,15 @@ def financing_sensitivity(summary: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def candidate_rankings(summary: pd.DataFrame) -> pd.DataFrame:
+def add_acceptance_flags(summary: pd.DataFrame) -> pd.DataFrame:
     out = summary.copy()
-    out["financing_sensitivity_penalty"] = out.groupby(["label_spec", "model_family", "policy_name", "policy_params", "leverage_policy", "leverage"], dropna=False)["CAGR"].transform("std").fillna(0.0)
     out["passes_acceptance"] = out.apply(candidate_passes, axis=1)
+    return out
+
+
+def candidate_rankings(summary: pd.DataFrame) -> pd.DataFrame:
+    out = add_acceptance_flags(summary)
+    out["financing_sensitivity_penalty"] = out.groupby(["label_spec", "model_family", "policy_name", "policy_params", "leverage_policy", "leverage"], dropna=False)["CAGR"].transform("std").fillna(0.0)
     passing = out[out["passes_acceptance"]].copy()
     rest = out[~out["passes_acceptance"]].copy()
     sort_cols = ["Sharpe", "CAGR", "Max DD", "Switch Count", "financing_sensitivity_penalty"]
@@ -1240,13 +1245,13 @@ def main() -> None:
                 summary_rows.extend(rows)
                 curve_frames.extend(curves)
             if summary_rows:
-                partial = add_benchmark_gaps(pd.DataFrame(summary_rows), spy_row, xgb_row, bc2_row)
+                partial = add_acceptance_flags(add_benchmark_gaps(pd.DataFrame(summary_rows), spy_row, xgb_row, bc2_row))
                 partial_rankings = candidate_rankings(partial)
                 write_csv(partial, "candidate_summary.csv")
                 write_csv(partial_rankings, "candidate_rankings.csv")
                 write_readme(partial, partial_rankings, pd.concat(meta_frames, ignore_index=True), spy_row, xgb_row)
 
-    summary = add_benchmark_gaps(pd.DataFrame(summary_rows), spy_row, xgb_row, bc2_row) if summary_rows else pd.DataFrame()
+    summary = add_acceptance_flags(add_benchmark_gaps(pd.DataFrame(summary_rows), spy_row, xgb_row, bc2_row)) if summary_rows else pd.DataFrame()
     rankings = candidate_rankings(summary) if not summary.empty else pd.DataFrame()
     meta_results = pd.concat(meta_frames, ignore_index=True) if meta_frames else pd.DataFrame()
     calibration = pd.concat(calibration_frames, ignore_index=True) if calibration_frames else pd.DataFrame()
