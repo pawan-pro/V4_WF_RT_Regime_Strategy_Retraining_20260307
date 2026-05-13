@@ -388,30 +388,20 @@ def label_specs(full_label_grid: bool = False) -> list[LabelSpec]:
     ]
     if full_label_grid:
         return all_specs
-    primary_ret = 0.0050
-    primary_dd = 0.075
-    compact = [
+    return [
         LabelSpec("general_trust", ret, dd)
         for ret in RETURN_THRESHOLDS
         for dd in DRAWDOWN_THRESHOLDS
     ]
-    compact.extend(
-        [
-            LabelSpec("risk_on_trust", primary_ret, primary_dd),
-            LabelSpec("drawdown_veto", primary_ret, primary_dd),
-        ]
-    )
-    return compact
 
 
-def model_specs(max_models: int | None = None, full_model_grid: bool = False) -> list[ModelSpec]:
-    families = []
-    if OPTIONAL_MODELS["xgboost"]["available"]:
-        families.append("xgboost")
-    elif not full_model_grid:
-        families.append("hist_gradient_boosting")
+def model_specs(max_models: int | None = None, full_model_grid: bool = False, include_xgboost: bool = False) -> list[ModelSpec]:
+    families = ["hist_gradient_boosting"]
+    if include_xgboost and OPTIONAL_MODELS["xgboost"]["available"]:
+        families.insert(0, "xgboost")
     if full_model_grid:
-        families.append("hist_gradient_boosting")
+        if OPTIONAL_MODELS["xgboost"]["available"]:
+            families.insert(0, "xgboost")
         if OPTIONAL_MODELS["lightgbm"]["available"]:
             families.append("lightgbm")
         if OPTIONAL_MODELS["catboost"]["available"]:
@@ -1092,7 +1082,7 @@ def write_runtime_manifest(args: argparse.Namespace, started_at: datetime, bil_m
             "selected_model_families": [spec.model_family for spec in selected_models],
             "full_model_grid": bool(args.full_model_grid),
             "full_label_grid": bool(args.full_label_grid),
-            "bounded_first_run_note": "Default run uses XGBoost if available, otherwise sklearn HistGradientBoosting. It evaluates all general-trust threshold combinations plus primary risk-on and drawdown-veto labels. Full label and model grids are available behind --full-label-grid and --full-model-grid for an overnight run.",
+            "bounded_first_run_note": "Default run uses sklearn HistGradientBoosting on all general-trust threshold combinations. XGBoost and full label/model grids are available behind --include-xgboost, --full-label-grid, and --full-model-grid for an overnight run.",
             "financing_grid": FINANCING_GRID,
             "headline_financing_rate": HEADLINE_FINANCING_RATE,
             "headline_financing_label": HEADLINE_FINANCING_LABEL,
@@ -1201,6 +1191,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-models", type=int, default=None, help="Optional debug cap for model families.")
     parser.add_argument("--full-label-grid", action="store_true", help="Run all label families across all threshold combinations.")
     parser.add_argument("--full-model-grid", action="store_true", help="Run optional LightGBM/CatBoost/RandomForest families when available.")
+    parser.add_argument("--include-xgboost", action="store_true", help="Include XGBoost in addition to the default fast sklearn tree model.")
     parser.add_argument("--include-min-hold", action="store_true", help="Run optional minimum-hold smoothing policy.")
     args, _unknown = parser.parse_known_args()
     return args
@@ -1215,7 +1206,7 @@ def main() -> None:
     grid = attach_bil(grid_raw, bil_prices)
     base_signals = load_base_signals()
     prior, spy_row, xgb_row, bc2_row = load_benchmark_rows()
-    models = model_specs(args.max_models, full_model_grid=args.full_model_grid)
+    models = model_specs(args.max_models, full_model_grid=args.full_model_grid, include_xgboost=args.include_xgboost)
     write_runtime_manifest(args, started_at, bil_meta, models)
     write_input_hashes(grid, bil_meta, prior)
 
