@@ -388,16 +388,17 @@ def label_specs() -> list[LabelSpec]:
     ]
 
 
-def model_specs(max_models: int | None = None) -> list[ModelSpec]:
+def model_specs(max_models: int | None = None, full_model_grid: bool = False) -> list[ModelSpec]:
     families = []
     if OPTIONAL_MODELS["xgboost"]["available"]:
         families.append("xgboost")
-    if OPTIONAL_MODELS["lightgbm"]["available"]:
-        families.append("lightgbm")
-    if OPTIONAL_MODELS["catboost"]["available"]:
-        families.append("catboost")
-    families.extend(["hist_gradient_boosting", "random_forest"])
-    # Keep the first run broad enough to compare model families but bounded.
+    families.append("hist_gradient_boosting")
+    if full_model_grid:
+        if OPTIONAL_MODELS["lightgbm"]["available"]:
+            families.append("lightgbm")
+        if OPTIONAL_MODELS["catboost"]["available"]:
+            families.append("catboost")
+        families.append("random_forest")
     deduped = []
     for family in families:
         if family not in deduped:
@@ -673,7 +674,7 @@ def build_policy_signals(pred: pd.DataFrame, policy_name: str, params: dict[str,
     return out
 
 
-def policy_specs() -> list[tuple[str, dict[str, Any]]]:
+def policy_specs(include_min_hold: bool = False) -> list[tuple[str, dict[str, Any]]]:
     specs: list[tuple[str, dict[str, Any]]] = []
     for threshold in POLICY_A_THRESHOLDS:
         for safe_asset in ["SPY", "BIL"]:
@@ -685,8 +686,9 @@ def policy_specs() -> list[tuple[str, dict[str, Any]]]:
     for high in POLICY_C_HIGH_THRESHOLDS:
         for lev in POLICY_C_LEVERAGE:
             specs.append(("C_leverage_permission", {"high_threshold": high, "max_leverage": lev}))
-    for hold in MIN_HOLD_DAYS:
-        specs.append(("D_min_hold_smoothing", {"threshold": 0.55, "safe_asset": "SPY", "min_hold_days": hold}))
+    if include_min_hold:
+        for hold in MIN_HOLD_DAYS:
+            specs.append(("D_min_hold_smoothing", {"threshold": 0.55, "safe_asset": "SPY", "min_hold_days": hold}))
     return specs
 
 
@@ -1054,7 +1056,7 @@ def compact_vs(summary: pd.DataFrame, benchmark: str) -> pd.DataFrame:
     return summary[cols].copy()
 
 
-def write_runtime_manifest(args: argparse.Namespace, started_at: datetime, bil_meta: dict[str, Any]) -> None:
+def write_runtime_manifest(args: argparse.Namespace, started_at: datetime, bil_meta: dict[str, Any], selected_models: list[ModelSpec]) -> None:
     write_json(
         {
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -1067,7 +1069,10 @@ def write_runtime_manifest(args: argparse.Namespace, started_at: datetime, bil_m
             "return_thresholds": RETURN_THRESHOLDS,
             "drawdown_thresholds": DRAWDOWN_THRESHOLDS,
             "horizon_hours": FWD_HOURS,
-            "policy_specs": policy_specs(),
+            "policy_specs": policy_specs(include_min_hold=args.include_min_hold),
+            "selected_model_families": [spec.model_family for spec in selected_models],
+            "full_model_grid": bool(args.full_model_grid),
+            "bounded_first_run_note": "Default run uses XGBoost if available plus sklearn HistGradientBoosting across the full label grid. LightGBM/CatBoost availability is recorded but those families run only with --full-model-grid.",
             "financing_grid": FINANCING_GRID,
             "headline_financing_rate": HEADLINE_FINANCING_RATE,
             "headline_financing_label": HEADLINE_FINANCING_LABEL,
@@ -1174,7 +1179,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run strict-PIT V4.2 meta-label tree research.")
     parser.add_argument("--max-label-specs", type=int, default=None, help="Optional debug cap for label specs.")
     parser.add_argument("--max-models", type=int, default=None, help="Optional debug cap for model families.")
-    parser.add_argument("--skip-min-hold", action="store_true", help="Skip optional minimum-hold policy.")
+    parser.add_argument("--full-model-grid", action="store_true", help="Run optional LightGBM/CatBoost/RandomForest families when available.")
+    parser.add_argument("--include-min-hold", action="store_true", help="Run optional minimum-hold smoothing policy.")
     args, _unknown = parser.parse_known_args()
     return args
 
@@ -1188,17 +1194,15 @@ def main() -> None:
     grid = attach_bil(grid_raw, bil_prices)
     base_signals = load_base_signals()
     prior, spy_row, xgb_row, bc2_row = load_benchmark_rows()
-    write_runtime_manifest(args, started_at, bil_meta)
+    models = model_specs(args.max_models, full_model_grid=args.full_model_grid)
+    write_runtime_manifest(args, started_at, bil_meta, models)
     write_input_hashes(grid, bil_meta, prior)
 
     work = build_work_frame(grid, base_signals)
     specs = label_specs()
     if args.max_label_specs is not None:
         specs = specs[: args.max_label_specs]
-    models = model_specs(args.max_models)
-    policies = policy_specs()
-    if args.skip_min_hold:
-        policies = [p for p in policies if p[0] != "D_min_hold_smoothing"]
+    policies = policy_specs(include_min_hold=args.include_min_hold)
 
     all_pred_frames: list[pd.DataFrame] = []
     meta_frames: list[pd.DataFrame] = []
