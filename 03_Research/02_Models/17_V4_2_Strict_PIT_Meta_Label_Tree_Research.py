@@ -388,11 +388,7 @@ def label_specs(full_label_grid: bool = False) -> list[LabelSpec]:
     ]
     if full_label_grid:
         return all_specs
-    return [
-        LabelSpec("general_trust", ret, dd)
-        for ret in RETURN_THRESHOLDS
-        for dd in DRAWDOWN_THRESHOLDS
-    ]
+    return [LabelSpec("general_trust", 0.0025, 0.100)]
 
 
 def model_specs(max_models: int | None = None, full_model_grid: bool = False, include_xgboost: bool = False) -> list[ModelSpec]:
@@ -1082,7 +1078,7 @@ def write_runtime_manifest(args: argparse.Namespace, started_at: datetime, bil_m
             "selected_model_families": [spec.model_family for spec in selected_models],
             "full_model_grid": bool(args.full_model_grid),
             "full_label_grid": bool(args.full_label_grid),
-            "bounded_first_run_note": "Default run uses sklearn HistGradientBoosting on all general-trust threshold combinations. XGBoost and full label/model grids are available behind --include-xgboost, --full-label-grid, and --full-model-grid for an overnight run.",
+            "bounded_first_run_note": "Default run uses sklearn HistGradientBoosting on the primary general_trust_ret_025_dd_100 spec selected from checkpointed diagnostics. XGBoost and full label/model grids are available behind --include-xgboost, --full-label-grid, and --full-model-grid for an overnight run.",
             "financing_grid": FINANCING_GRID,
             "headline_financing_rate": HEADLINE_FINANCING_RATE,
             "headline_financing_label": HEADLINE_FINANCING_LABEL,
