@@ -379,21 +379,39 @@ def make_meta_label(work: pd.DataFrame, spec: LabelSpec) -> pd.Series:
     return label
 
 
-def label_specs() -> list[LabelSpec]:
-    return [
+def label_specs(full_label_grid: bool = False) -> list[LabelSpec]:
+    all_specs = [
         LabelSpec(label_type, ret, dd)
         for label_type in ["risk_on_trust", "general_trust", "drawdown_veto"]
         for ret in RETURN_THRESHOLDS
         for dd in DRAWDOWN_THRESHOLDS
     ]
+    if full_label_grid:
+        return all_specs
+    primary_ret = 0.0050
+    primary_dd = 0.075
+    compact = [
+        LabelSpec("general_trust", ret, dd)
+        for ret in RETURN_THRESHOLDS
+        for dd in DRAWDOWN_THRESHOLDS
+    ]
+    compact.extend(
+        [
+            LabelSpec("risk_on_trust", primary_ret, primary_dd),
+            LabelSpec("drawdown_veto", primary_ret, primary_dd),
+        ]
+    )
+    return compact
 
 
 def model_specs(max_models: int | None = None, full_model_grid: bool = False) -> list[ModelSpec]:
     families = []
     if OPTIONAL_MODELS["xgboost"]["available"]:
         families.append("xgboost")
-    families.append("hist_gradient_boosting")
+    elif not full_model_grid:
+        families.append("hist_gradient_boosting")
     if full_model_grid:
+        families.append("hist_gradient_boosting")
         if OPTIONAL_MODELS["lightgbm"]["available"]:
             families.append("lightgbm")
         if OPTIONAL_MODELS["catboost"]["available"]:
@@ -1068,11 +1086,13 @@ def write_runtime_manifest(args: argparse.Namespace, started_at: datetime, bil_m
             "label_types": ["risk_on_trust", "general_trust", "drawdown_veto"],
             "return_thresholds": RETURN_THRESHOLDS,
             "drawdown_thresholds": DRAWDOWN_THRESHOLDS,
+            "selected_label_specs": [spec.key for spec in label_specs(full_label_grid=args.full_label_grid)],
             "horizon_hours": FWD_HOURS,
             "policy_specs": policy_specs(include_min_hold=args.include_min_hold),
             "selected_model_families": [spec.model_family for spec in selected_models],
             "full_model_grid": bool(args.full_model_grid),
-            "bounded_first_run_note": "Default run uses XGBoost if available plus sklearn HistGradientBoosting across the full label grid. LightGBM/CatBoost availability is recorded but those families run only with --full-model-grid.",
+            "full_label_grid": bool(args.full_label_grid),
+            "bounded_first_run_note": "Default run uses XGBoost if available, otherwise sklearn HistGradientBoosting. It evaluates all general-trust threshold combinations plus primary risk-on and drawdown-veto labels. Full label and model grids are available behind --full-label-grid and --full-model-grid for an overnight run.",
             "financing_grid": FINANCING_GRID,
             "headline_financing_rate": HEADLINE_FINANCING_RATE,
             "headline_financing_label": HEADLINE_FINANCING_LABEL,
@@ -1179,6 +1199,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run strict-PIT V4.2 meta-label tree research.")
     parser.add_argument("--max-label-specs", type=int, default=None, help="Optional debug cap for label specs.")
     parser.add_argument("--max-models", type=int, default=None, help="Optional debug cap for model families.")
+    parser.add_argument("--full-label-grid", action="store_true", help="Run all label families across all threshold combinations.")
     parser.add_argument("--full-model-grid", action="store_true", help="Run optional LightGBM/CatBoost/RandomForest families when available.")
     parser.add_argument("--include-min-hold", action="store_true", help="Run optional minimum-hold smoothing policy.")
     args, _unknown = parser.parse_known_args()
@@ -1199,7 +1220,7 @@ def main() -> None:
     write_input_hashes(grid, bil_meta, prior)
 
     work = build_work_frame(grid, base_signals)
-    specs = label_specs()
+    specs = label_specs(full_label_grid=args.full_label_grid)
     if args.max_label_specs is not None:
         specs = specs[: args.max_label_specs]
     policies = policy_specs(include_min_hold=args.include_min_hold)
