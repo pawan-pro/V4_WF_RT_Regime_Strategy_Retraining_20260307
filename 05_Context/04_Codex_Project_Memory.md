@@ -52,6 +52,10 @@ Previous chats created overlapping token refreshers and overlapping RT writers. 
 3. Is the schedule aligned with the primary/downstream split?
 4. If touching order placement logic, does the execution universe still match ETF trading hours?
 
+## MUB-27 Research Carry-Forward
+
+For MUB-27 V4.2 model research conclusions, read `05_Context/2026-05-14_MUB27_Model_Research_Summary.md` and Linear MUB-27 before starting more research.
+
 ## Recommended Prompt For Future Codex Chats
 
 Start by reading `AGENTS.md` and `05_Context/04_Codex_Project_Memory.md` before proposing any Databricks workflow or Saxo auth changes.
