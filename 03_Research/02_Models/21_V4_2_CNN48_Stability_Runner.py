@@ -30,8 +30,32 @@ import numpy as np
 import pandas as pd
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-BASE_SCRIPT = SCRIPT_DIR / "20_V4_2_TCN_CNN_Temporal_Allocation.py"
+BASE_SCRIPT_NAME = "20_V4_2_TCN_CNN_Temporal_Allocation.py"
+
+
+def resolve_script_dir() -> Path:
+    candidates = [globals().get("__file__")]
+    if sys.argv:
+        candidates.append(sys.argv[0])
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(str(candidate))
+        if path.exists():
+            return path.resolve().parent
+
+    cwd = Path.cwd()
+    for parent in (cwd, *cwd.parents):
+        research_dir = parent / "03_Research" / "02_Models"
+        if (research_dir / BASE_SCRIPT_NAME).exists():
+            return research_dir.resolve()
+
+    raise RuntimeError("Unable to resolve script directory; base research script was not found.")
+
+
+SCRIPT_DIR = resolve_script_dir()
+BASE_SCRIPT = SCRIPT_DIR / BASE_SCRIPT_NAME
 CATALOG = "pawan_quant_research_1"
 SCHEMA = "v4"
 BASE = Path(f"/Volumes/{CATALOG}/{SCHEMA}/market_data")
