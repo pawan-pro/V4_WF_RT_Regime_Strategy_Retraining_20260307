@@ -24,6 +24,7 @@ from urllib.parse import urljoin
 
 import requests
 from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 from pyspark.sql.types import (
     DoubleType,
     StringType,
@@ -726,6 +727,23 @@ def write_broker_events(rows: list[dict]) -> None:
         return
 
     sdf = spark.createDataFrame(rows, schema=BROKER_HISTORY_SCHEMA)
+    incoming_count = sdf.count()
+    dedupe_window = Window.partitionBy("broker_event_id").orderBy(
+        F.col("broker_event_ts").desc_nulls_last(),
+        F.col("ingestion_ts").desc_nulls_last(),
+        F.col("raw_json").desc_nulls_last(),
+    )
+    sdf = (
+        sdf.withColumn("_rn", F.row_number().over(dedupe_window))
+        .filter(F.col("_rn") == 1)
+        .drop("_rn")
+    )
+    deduped_count = sdf.count()
+    if deduped_count != incoming_count:
+        print(
+            f"Deduplicated incoming broker history rows before MERGE: "
+            f"{incoming_count} -> {deduped_count}"
+        )
     sdf.createOrReplaceTempView("incoming_saxo_broker_trade_history")
     merge_sql = f"""
         MERGE INTO {TARGET_TABLE} t
