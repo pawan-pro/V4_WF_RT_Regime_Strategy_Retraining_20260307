@@ -54,8 +54,15 @@ SAXO_UIC_TO_SYMBOL = {
 
 SOURCE_BROKER = "broker_native_saxo_history"
 SOURCE_INTERNAL = "internal_saxo_trade_log"
+SOURCE_INTERNAL_PROVISIONAL = "internal_saxo_trade_log_provisional"
 NOTEBOOK_SOURCE = "rt_saxo_v4_strategy_ledger"
 COST_NOTES = "Saxo payload populated ConversionCost/ConversionRate; commission/fee fields not populated."
+PROVISIONAL_COST_NOTES = (
+    "Provisional same-day row from internal Saxo execution log because broker-native "
+    "cs_reports_trades was not yet available."
+)
+PROVISIONAL_LOOKBACK_DAYS = 5
+PROVISIONAL_MATCH_WINDOW_HOURS = 12
 
 try:
     dbutils.widgets.text("initial_strategy_capital", "5000")
@@ -854,6 +861,112 @@ def build_base_normalized_events(source_table: str, source_type: str):
     return normalize_internal_trade_log(source_table)
 
 
+def append_provisional_internal_events(base_events, source_type: str):
+    """Add same-day internal execution fallback rows when broker-native fills lag."""
+    if source_type != SOURCE_BROKER or not table_exists(INTERNAL_TRADE_LOG):
+        return base_events
+
+    internal_events = normalize_internal_trade_log(INTERNAL_TRADE_LOG)
+    cutoff_ts = F.current_timestamp() - F.expr(f"INTERVAL {PROVISIONAL_LOOKBACK_DAYS} DAYS")
+    internal_candidates = (
+        internal_events.where(F.col("event_ts").isNotNull())
+        .where(F.col("event_ts") >= cutoff_ts)
+        .withColumn("symbol", normalize_symbol_expr(F.col("symbol")))
+        .withColumn("side", normalize_side_expr(F.col("side")))
+        .where(F.col("symbol").isin(V4_SYMBOLS))
+        .where(F.col("side").isin("BUY", "SELL"))
+        .where(F.col("quantity") > 0)
+        .where(F.col("event_status_code").between(200, 299))
+        .where(F.col("event_action").isin("buy", "sell", "close"))
+        .withColumn(
+            "provisional_record_id",
+            F.sha2(
+                F.concat_ws(
+                    "|",
+                    F.lit("internal_execution_provisional"),
+                    F.col("event_ts").cast("string"),
+                    F.col("symbol"),
+                    F.col("side"),
+                    F.col("quantity").cast("string"),
+                    F.col("event_action"),
+                ),
+                256,
+            ),
+        )
+    )
+
+    if internal_candidates.limit(1).count() == 0:
+        print("No recent successful internal SPY/QQQ executions eligible for provisional fallback.")
+        return base_events
+
+    broker_fills = (
+        base_events.where(F.col("source") == SOURCE_BROKER)
+        .where(F.col("event_action") == "cs_reports_trades")
+        .where(F.col("event_ts").isNotNull())
+        .withColumn("symbol", normalize_symbol_expr(F.col("symbol")))
+        .withColumn("side", normalize_side_expr(F.col("side")))
+        .where(F.col("symbol").isin(V4_SYMBOLS))
+        .where(F.col("side").isin("BUY", "SELL"))
+        .select(
+            F.col("event_ts").alias("broker_event_ts"),
+            F.col("symbol").alias("broker_symbol"),
+            F.col("side").alias("broker_side"),
+            F.col("quantity").alias("broker_quantity"),
+        )
+    )
+
+    match_window_seconds = PROVISIONAL_MATCH_WINDOW_HOURS * 3600
+    match_condition = (
+        (F.col("i.symbol") == F.col("b.broker_symbol"))
+        & (F.col("i.side") == F.col("b.broker_side"))
+        & (
+            F.abs(F.coalesce(F.col("i.quantity"), F.lit(0.0)) - F.coalesce(F.col("b.broker_quantity"), F.lit(0.0)))
+            <= F.greatest(F.lit(0.01), F.abs(F.coalesce(F.col("i.quantity"), F.lit(0.0))) * F.lit(0.001))
+        )
+        & (
+            F.abs(F.unix_timestamp(F.col("i.event_ts")) - F.unix_timestamp(F.col("b.broker_event_ts")))
+            <= F.lit(match_window_seconds)
+        )
+    )
+
+    unmatched = (
+        internal_candidates.alias("i")
+        .join(broker_fills.alias("b"), match_condition, "left")
+        .where(F.col("b.broker_event_ts").isNull())
+        .select("i.*")
+    )
+
+    dedupe_window = Window.partitionBy("provisional_record_id").orderBy(
+        F.col("event_ts").desc_nulls_last(),
+        F.col("event_sequence").desc_nulls_last(),
+    )
+    provisional = (
+        unmatched.withColumn("_rn", F.row_number().over(dedupe_window))
+        .where(F.col("_rn") == 1)
+        .drop("_rn")
+        .withColumn("source", F.lit(SOURCE_INTERNAL_PROVISIONAL))
+        .withColumn("event_action", F.lit("internal_execution_provisional"))
+        .withColumn("parsed_total_transaction_cost", F.lit(0.0))
+        .withColumn("parsed_cost_is_estimated", F.lit(False))
+        .withColumn("parsed_cost_estimation_method", F.lit(None).cast("string"))
+        .withColumn("parsed_cost_source", F.lit("modeled_5bps_provisional"))
+        .withColumn("trade_id", F.lit(None).cast("string"))
+        .withColumn("source_record_id", F.col("provisional_record_id"))
+        .drop("provisional_record_id")
+    )
+
+    provisional_count = provisional.count()
+    if provisional_count == 0:
+        print("No provisional internal execution fallback rows needed; broker-native fills cover recent internal executions.")
+        return base_events
+
+    print(
+        f"Added {provisional_count} provisional internal Saxo execution row(s) "
+        "pending broker-native cs_reports_trades confirmation."
+    )
+    return base_events.unionByName(provisional, allowMissingColumns=True)
+
+
 # ---------------------------------------------------------------------------
 # Ledger assembly
 # ---------------------------------------------------------------------------
@@ -964,6 +1077,7 @@ def build_strategy_ledger(base_events):
                 (F.col("source") == SOURCE_BROKER) & (F.col("total_transaction_cost") > 0),
                 F.coalesce(F.col("parsed_cost_source"), F.lit("broker_reported_conversion_cost")),
             )
+            .when(F.col("source") == SOURCE_INTERNAL_PROVISIONAL, F.lit("modeled_5bps_provisional"))
             .when(F.col("source") == SOURCE_INTERNAL, F.col("parsed_cost_source"))
             .otherwise(F.lit(None).cast("string")),
         )
@@ -974,11 +1088,15 @@ def build_strategy_ledger(base_events):
                 F.lit("broker_confirmed_conversion_cost"),
             )
             .when(F.col("source") == SOURCE_BROKER, F.lit("broker_fill_no_conversion_cost_observed"))
+            .when(F.col("source") == SOURCE_INTERNAL_PROVISIONAL, F.lit("provisional_internal_execution_no_broker_cost"))
             .when(F.col("cost_is_estimated"), F.lit("estimated"))
             .otherwise(F.lit("internal_or_unconfirmed_cost")),
         )
         .withColumn("all_in_cost_confirmed", F.lit(False))
-        .withColumn("cost_notes", F.lit(COST_NOTES))
+        .withColumn(
+            "cost_notes",
+            F.when(F.col("source") == SOURCE_INTERNAL_PROVISIONAL, F.lit(PROVISIONAL_COST_NOTES)).otherwise(F.lit(COST_NOTES)),
+        )
         .withColumn(
             "is_v4_strategy_trade",
             F.col("candidate_v4_trade"),
@@ -1618,6 +1736,7 @@ def main() -> None:
     ensure_gold_tables()
     source_table, source_type = resolve_source_table()
     base_events = build_base_normalized_events(source_table, source_type)
+    base_events = append_provisional_internal_events(base_events, source_type)
     ledger_df = build_strategy_ledger(base_events)
     write_gold_table(
         ledger_df,
