@@ -5,6 +5,7 @@
 # MAGIC %run ../../06_Databricks/02_Scripts/03_Delta_Retry_Utils
 
 import json
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -32,13 +33,14 @@ REDIRECT_URI = "https://localhost/callback"
 
 CLIENT_ID = "5b0974db36f54f3b96ec07b8f5fc657d"
 CLIENT_SECRET = "8a7f591c89ca4f0299256b041ba891e2"
-CLIENT_KEY = "hLMMvwa3Mzmiem2AMhpKwA=="
 TOKEN_STATE_PATH = "dbfs:/Volumes/pawan_quant_research_1/default/saxo/avik_live_token_state.json"
 
 EXPECTED_LIVE_ACCOUNT_ID = "33888/261196"
 EXPECTED_LIVE_CURRENCY = "USD"
 DEFAULT_ACCOUNT_KEY_SECRET_SCOPE = "saxo"
 DEFAULT_ACCOUNT_KEY_SECRET_KEY = "usd_account_key"
+DEFAULT_CLIENT_KEY_SECRET_SCOPE = "saxo"
+DEFAULT_CLIENT_KEY_SECRET_KEY = "client_key"
 
 SIGNAL_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_regime_signal"
 MARKET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_market_1h"
@@ -119,6 +121,14 @@ SAXO_ACCOUNT_KEY_SECRET_KEY = widget_text(
     "saxo_account_key_secret_key",
     DEFAULT_ACCOUNT_KEY_SECRET_KEY,
 )
+SAXO_CLIENT_KEY_SECRET_SCOPE = widget_text(
+    "saxo_client_key_secret_scope",
+    DEFAULT_CLIENT_KEY_SECRET_SCOPE,
+)
+SAXO_CLIENT_KEY_SECRET_KEY = widget_text(
+    "saxo_client_key_secret_key",
+    DEFAULT_CLIENT_KEY_SECRET_KEY,
+)
 
 if EXECUTION_MODE not in {"shadow", "live"}:
     raise ValueError(f"Unsupported execution_mode: {EXECUTION_MODE}")
@@ -139,8 +149,25 @@ def resolve_saxo_account_key() -> str:
     return account_key
 
 
+def resolve_saxo_client_key() -> str:
+    if not SAXO_CLIENT_KEY_SECRET_SCOPE or not SAXO_CLIENT_KEY_SECRET_KEY:
+        raise RuntimeError("Saxo client key secret scope/key is required.")
+    try:
+        client_key = dbutils.secrets.get(
+            SAXO_CLIENT_KEY_SECRET_SCOPE,
+            SAXO_CLIENT_KEY_SECRET_KEY,
+        ).strip()
+    except Exception:
+        client_key = os.environ.get("SAXO_CLIENT_KEY", "").strip()
+    if not client_key:
+        raise RuntimeError("Saxo client key is not configured in saxo/client_key or SAXO_CLIENT_KEY.")
+    return client_key
+
+
 ACCOUNT_KEY = resolve_saxo_account_key()
-REDACTION_SECRETS = [ACCOUNT_KEY]
+CLIENT_KEY = resolve_saxo_client_key()
+REDACTION_SECRETS = [ACCOUNT_KEY, CLIENT_KEY]
+CONFIGURED_ACCOUNT_ID = None
 
 
 def redact_text(text):
@@ -156,6 +183,12 @@ def redact_text(text):
 
 
 def redact_account_key(value):
+    if not value:
+        return None
+    return f"{value[:4]}...{value[-4:]}" if len(value) > 8 else "[REDACTED]"
+
+
+def redact_secret(value):
     if not value:
         return None
     return f"{value[:4]}...{value[-4:]}" if len(value) > 8 else "[REDACTED]"
@@ -200,6 +233,29 @@ def account_key_from_payload(payload) -> Optional[str]:
         "Order.AccountKey",
     )
     return str(value) if value is not None else None
+
+
+def account_id_from_payload(payload) -> Optional[str]:
+    value = first_path(
+        payload,
+        "AccountId",
+        "Account.AccountId",
+        "PositionBase.AccountId",
+        "NetPositionBase.AccountId",
+        "Order.AccountId",
+        "AccountNumber",
+    )
+    return str(value) if value is not None else None
+
+
+def payload_matches_configured_account(payload) -> bool:
+    payload_account_key = account_key_from_payload(payload)
+    payload_account_id = account_id_from_payload(payload)
+    if payload_account_key is not None:
+        return payload_account_key == ACCOUNT_KEY
+    if payload_account_id is not None and CONFIGURED_ACCOUNT_ID is not None:
+        return payload_account_id == CONFIGURED_ACCOUNT_ID
+    return False
 
 
 def uic_from_payload(payload) -> Optional[int]:
@@ -412,9 +468,11 @@ def find_configured_account(headers):
     account = matches[0]
     account_id = first_path(account, "AccountId", "AccountNumber")
     currency = first_path(account, "Currency", "AccountCurrency")
+    if account_id is None or currency is None:
+        raise RuntimeError("Configured Saxo account is missing AccountId or Currency.")
     return {
-        "account_id": str(account_id) if account_id is not None else None,
-        "currency": str(currency) if currency is not None else None,
+        "account_id": str(account_id),
+        "currency": str(currency).upper(),
     }
 
 
@@ -427,11 +485,11 @@ def enforce_live_account_guard(account_info, balance_payload):
             f"Live Saxo execution blocked: configured account_id={account_info['account_id']} "
             f"does not match required {EXPECTED_LIVE_ACCOUNT_ID}."
         )
-    if account_info["currency"] != EXPECTED_LIVE_CURRENCY:
+    if account_info["currency"].upper() != EXPECTED_LIVE_CURRENCY:
         raise RuntimeError(
             "Live Saxo execution blocked: configured account currency is not USD."
         )
-    if balance_currency is not None and balance_currency != EXPECTED_LIVE_CURRENCY:
+    if balance_currency is not None and str(balance_currency).upper() != EXPECTED_LIVE_CURRENCY:
         raise RuntimeError(
             "Live Saxo execution blocked: balance payload currency is not USD."
         )
@@ -488,8 +546,9 @@ def active_positions(positions_payload):
     ignored_missing_account_key = 0
     for position in positions_payload.get("Data", []):
         payload_account_key = account_key_from_payload(position)
-        if payload_account_key != ACCOUNT_KEY:
-            if payload_account_key is None:
+        payload_account_id = account_id_from_payload(position)
+        if not payload_matches_configured_account(position):
+            if payload_account_key is None and payload_account_id is None:
                 ignored_missing_account_key += 1
             else:
                 ignored_other_account += 1
@@ -546,8 +605,9 @@ def active_symbol_orders(orders_payload):
     ignored_missing_account_key = 0
     for order in orders_payload.get("Data", []):
         payload_account_key = account_key_from_payload(order)
-        if payload_account_key != ACCOUNT_KEY:
-            if payload_account_key is None:
+        payload_account_id = account_id_from_payload(order)
+        if not payload_matches_configured_account(order):
+            if payload_account_key is None and payload_account_id is None:
                 ignored_missing_account_key += 1
             else:
                 ignored_other_account += 1
@@ -919,6 +979,7 @@ target_position, target_asset = target_from_latest_signal(signal)
 target_ticker = target_asset["symbol"] if target_asset else "CASH"
 
 account_info = find_configured_account(headers)
+CONFIGURED_ACCOUNT_ID = account_info["account_id"]
 pre_positions_payload = fetch_positions(headers)
 pre_active_positions = active_positions(pre_positions_payload)
 pre_balance_payload = fetch_balance(headers)
@@ -1300,9 +1361,11 @@ print(f"Saxo account id: {account_info['account_id']}")
 print(f"Saxo account currency: {account_info['currency']}")
 print(f"Saxo balance payload currency: {post_balance.get('account_currency')}")
 print(f"Saxo account key redacted: {redact_account_key(ACCOUNT_KEY)}")
+print(f"Saxo client key redacted: {redact_secret(CLIENT_KEY)}")
 print(f"Signal timestamp: {signal_ts}")
 print(f"Signal regime: {regime_name}")
 print(f"Target allocation: {target_position}")
+print(f"Target ticker: {target_ticker}")
 print(f"Orders: {trade_row['orders_placed']}")
 print(f"Account balance: {account_balance}")
 print(f"Account equity: {account_equity}")

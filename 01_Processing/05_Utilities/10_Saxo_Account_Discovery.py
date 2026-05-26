@@ -1,10 +1,10 @@
 # Databricks notebook source
-# Saxo account discovery and temporary gated USD AccountKey secret handoff.
-# Normal discover mode prints redacted account metadata only.
+# Saxo account discovery. Prints redacted account metadata only.
 
 import ast
 import hashlib
 import json
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -13,18 +13,14 @@ from typing import Any, Optional
 import requests
 
 BASE_URL = "https://gateway.saxobank.com/openapi"
-CLIENT_KEY = "hLMMvwa3Mzmiem2AMhpKwA=="
 TOKEN_STATE_PATH = "dbfs:/Volumes/pawan_quant_research_1/default/saxo/avik_live_token_state.json"
 
 USD_ACCOUNT_ID = "33888/261196"
 USD_CURRENCY = "USD"
+SGD_ACCOUNT_ID = "33888/256469"
+SGD_CURRENCY = "SGD"
 SECRET_SCOPE = "saxo"
-SECRET_KEY = "usd_account_key"
-STORE_SECRET_CONFIRMATION = "STORE_USD_ACCOUNT_KEY_33888_261196"
-NO_SECRET_WRITE_MESSAGE = (
-    "Databricks notebook cannot write secrets here. Use Databricks CLI/UI and copy "
-    "the full key from a temporary local variable in an interactive private run."
-)
+CLIENT_KEY_SECRET_KEY = "client_key"
 
 SAXO_RETRY_MAX_ATTEMPTS = 4
 SAXO_RETRY_BASE_SECONDS = 1.0
@@ -44,10 +40,21 @@ def widget(name: str, default: str) -> str:
 
 
 OPERATION_MODE = widget("operation_mode", "discover").lower()
-CONFIRM_STORE_SECRET = widget("confirm_store_secret", "")
+if OPERATION_MODE != "discover":
+    raise ValueError("operation_mode must be 'discover'. Full-key reveal/store modes are not supported.")
 
-if OPERATION_MODE not in {"discover", "store_usd_key_secret"}:
-    raise ValueError("operation_mode must be discover or store_usd_key_secret")
+
+def resolve_client_key() -> str:
+    try:
+        value = dbutils.secrets.get(SECRET_SCOPE, CLIENT_KEY_SECRET_KEY).strip()
+    except Exception:
+        value = os.environ.get("SAXO_CLIENT_KEY", "").strip()
+    if not value:
+        raise RuntimeError("Saxo ClientKey is not configured in saxo/client_key or SAXO_CLIENT_KEY.")
+    return value
+
+
+CLIENT_KEY = resolve_client_key()
 
 
 def safe_json_loads(payload: Any) -> Optional[Any]:
@@ -86,7 +93,7 @@ def fingerprint(value: Optional[str]) -> Optional[str]:
 
 def redact_text(text: Any, secrets: Optional[list[str]] = None) -> str:
     redacted = str(text)
-    for secret in secrets or []:
+    for secret in [CLIENT_KEY] + (secrets or []):
         if secret:
             redacted = redacted.replace(secret, "[REDACTED]")
     redacted = re.sub(r"Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]", redacted)
@@ -211,17 +218,18 @@ def account_key(account: dict) -> Optional[str]:
     return str(value) if value else None
 
 
-def find_usd_account(accounts: list[dict]) -> dict:
-    matches = [account for account in accounts if account_id(account) == USD_ACCOUNT_ID]
+def find_account(accounts: list[dict], expected_account_id: str, expected_currency: str) -> dict:
+    matches = [account for account in accounts if account_id(account) == expected_account_id]
     if len(matches) != 1:
-        raise RuntimeError(f"Expected exactly one USD account {USD_ACCOUNT_ID}; found {len(matches)}.")
+        raise RuntimeError(f"Expected exactly one account {expected_account_id}; found {len(matches)}.")
     account = matches[0]
-    if account_currency(account) != USD_CURRENCY:
+    if account_currency(account) != expected_currency:
         raise RuntimeError(
-            f"USD account guard failed. Expected currency {USD_CURRENCY}; got {account_currency(account)}."
+            f"Account guard failed for {expected_account_id}. "
+            f"Expected currency {expected_currency}; got {account_currency(account)}."
         )
     if not account_key(account):
-        raise RuntimeError(f"USD account {USD_ACCOUNT_ID} has no AccountKey in Saxo discovery payload.")
+        raise RuntimeError(f"Account {expected_account_id} has no AccountKey in Saxo discovery payload.")
     return account
 
 
@@ -235,17 +243,12 @@ def static_validate_no_full_key_prints() -> bool:
 
     violations = []
     tree = ast.parse(source)
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         segment = ast.get_source_segment(source, node) or ""
         if isinstance(node.func, ast.Name) and node.func.id == "print":
-            risky_names = {
-                child.id
-                for child in ast.walk(node)
-                if isinstance(child, ast.Name)
-                and child.id in {"secret_value", "usd_account_key_private_handoff"}
-            }
             risky_calls = [
                 child.func.id
                 for child in ast.walk(node)
@@ -253,7 +256,7 @@ def static_validate_no_full_key_prints() -> bool:
                 and isinstance(child.func, ast.Name)
                 and child.func.id == "account_key"
             ]
-            if risky_names or risky_calls:
+            if risky_calls:
                 violations.append(f"unsafe print call: {segment[:120]}")
         if re.search(r"dbutils\.notebook\.exit\(|to_csv\(|dbutils\.fs\.put\(", segment):
             violations.append(f"unsafe write/exit call: {segment[:120]}")
@@ -263,64 +266,35 @@ def static_validate_no_full_key_prints() -> bool:
     return True
 
 
-def print_discovery(accounts: list[dict], usd_account: dict):
-    usd_key = account_key(usd_account)
-    usd_key_present = bool(usd_key)
-    usd_key_length = len(usd_key or "")
-    usd_key_fingerprint = fingerprint(usd_key)
+def print_discovery(accounts: list[dict], target_accounts: list[tuple[str, dict]]):
     print(f"Saxo account discovery mode: {OPERATION_MODE}")
+    print(f"ClientKey loaded: {bool(CLIENT_KEY)} length: {len(CLIENT_KEY)} redacted: {CLIENT_KEY[:4]}...{CLIENT_KEY[-4:]}")
     print(f"Discovered account count: {len(accounts)}")
     print("Accounts:")
     for item in accounts:
         print(json.dumps(redact_account(item), sort_keys=True))
-    print(
-        "USD account verified:",
-        USD_ACCOUNT_ID,
-        account_currency(usd_account),
-        "key_present:",
-        usd_key_present,
-        "key_length:",
-        usd_key_length,
-        "key_sha256_12:",
-        usd_key_fingerprint,
-    )
-
-
-def store_usd_key_secret(usd_account: dict):
-    if CONFIRM_STORE_SECRET != STORE_SECRET_CONFIRMATION:
-        raise RuntimeError("confirm_store_secret exact value missing. Secret handoff is blocked.")
-    secret_value = account_key(usd_account)
-    if not secret_value:
-        raise RuntimeError("USD AccountKey is missing. Secret handoff is blocked.")
-
-    static_validate_no_full_key_prints()
-    try:
-        put_secret = dbutils.secrets.put
-    except Exception:
-        print(NO_SECRET_WRITE_MESSAGE)
-        return False
-
-    try:
-        put_secret(SECRET_SCOPE, SECRET_KEY, secret_value)
-    except Exception as exc:
-        redacted_error = redact_text(str(exc), [secret_value])
-        print(NO_SECRET_WRITE_MESSAGE)
-        print(f"Secret write failed: {type(exc).__name__}: {redacted_error}")
-        return False
-
-    v = dbutils.secrets.get(SECRET_SCOPE, SECRET_KEY)
-    print("loaded:", bool(v), "length:", len(v), "redacted:", v[:4] + "..." + v[-4:])
-    return True
+    for label, account in target_accounts:
+        key_value = account_key(account)
+        print(
+            f"{label} account verified:",
+            account_id(account),
+            account_currency(account),
+            "key_present:",
+            bool(key_value),
+            "key_length:",
+            len(key_value or ""),
+            "key_sha256_12:",
+            fingerprint(key_value),
+        )
 
 
 def run():
+    static_validate_no_full_key_prints()
     accounts = fetch_accounts()
-    usd_account = find_usd_account(accounts)
-    if OPERATION_MODE == "discover":
-        print_discovery(accounts, usd_account)
-        return
+    usd_account = find_account(accounts, USD_ACCOUNT_ID, USD_CURRENCY)
+    sgd_account = find_account(accounts, SGD_ACCOUNT_ID, SGD_CURRENCY)
 
-    store_usd_key_secret(usd_account)
+    print_discovery(accounts, [("USD", usd_account), ("SGD", sgd_account)])
 
 
 run()
