@@ -38,6 +38,16 @@ This file exists so future Codex chats can recover the operating context for thi
 - Post-release cleanup aligned local Git `main`, the Databricks repo branch `main`, and the repo-backed workspace path `/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github` at repo id `2360562195327963`.
 - For full release context and rollback anchors, read `2026-04-20_improved_alfred_model_update_bug_addressal_report.md`.
 
+## Official V4 Backtest Baseline
+
+- As of `2026-04-30`, the official V4 backtest / management-reporting baseline is the promoted corrected-ALFRED recreated-legacy variant.
+- The promoted slide-ready baseline reproduces from the corrected artifact reporting layer at `20.8405%` CAGR, `1.0024` Sharpe, `1.3729` Sortino, `-25.5385%` max drawdown, and final equity `12883454.99` for `2021-01-01` to `2025-12-31`.
+- This baseline promotion changed canonical reporting artifacts only: `pawan_quant_research_1.v4.bt_walkforward_regime_signals`, `/Volumes/pawan_quant_research_1/v4/market_data/bt_walkforward_regime_signals.csv`, and `/Volumes/pawan_quant_research_1/v4/market_data/bt_fred_1d_regime_signals-v4.csv`.
+- `pawan_quant_research_1.v4.silver_bt_master_grid_1h` was **not** overwritten because the corrected recreated-legacy silver lineage is not schema-compatible with the canonical alias (`QQQ_close` is missing). The promoted production-owned preserved copy is `pawan_quant_research_1.v4.silver_bt_master_grid_1h_corrected_alfred_baseline_20260430`.
+- The canonical walk-forward signal alias was rebuilt in compatibility form from corrected walk-forward predictions plus corrected labels so downstream analysis expecting `timestamp, regime, predicted_regime` continues to work.
+- Pre-promotion rollback anchors were captured under suffix `pre_corrected_alfred_promotion_20260430`; see `/Volumes/pawan_quant_research_1/v4/market_data/reports/v4_corrected_alfred_promotion_manifest_2026-04-30.json`.
+- `model_registry_current` was not edited on `2026-04-30`; it already pointed at confirmed model version `bt_fred_1d_xgboost_regime_2026_04_20`, and live Saxo execution / token refresh / RT schedules were left unchanged.
+
 ## Why This Exists
 
 Previous chats created overlapping token refreshers and overlapping RT writers. That caused:

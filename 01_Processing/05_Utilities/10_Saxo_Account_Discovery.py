@@ -21,6 +21,15 @@ SGD_ACCOUNT_ID = "33888/256469"
 SGD_CURRENCY = "SGD"
 SECRET_SCOPE = "saxo"
 CLIENT_KEY_SECRET_KEY = "client_key"
+USD_SECRET_KEY = "usd_account_key"
+SGD_SECRET_KEY = "sgd_account_key"
+STORE_USD_SECRET_CONFIRMATION = "STORE_USD_ACCOUNT_KEY_33888_261196"
+STORE_SGD_SECRET_CONFIRMATION = "STORE_SGD_ACCOUNT_KEY_33888_256469"
+REVEAL_SGD_SECRET_CONFIRMATION = "REVEAL_SGD_ACCOUNT_KEY_33888_256469_ONCE"
+NO_SECRET_WRITE_MESSAGE = (
+    "Databricks notebook cannot write secrets here. Use Databricks CLI/UI and copy the full key "
+    "from a temporary local variable in an interactive private run."
+)
 
 SAXO_RETRY_MAX_ATTEMPTS = 4
 SAXO_RETRY_BASE_SECONDS = 1.0
@@ -40,8 +49,17 @@ def widget(name: str, default: str) -> str:
 
 
 OPERATION_MODE = widget("operation_mode", "discover").lower()
-if OPERATION_MODE != "discover":
-    raise ValueError("operation_mode must be 'discover'. Full-key reveal/store modes are not supported.")
+CONFIRM_STORE_SECRET = widget("confirm_store_secret", "")
+CONFIRM_REVEAL_SECRET = widget("confirm_reveal_secret", "")
+
+ALLOWED_OPERATION_MODES = {
+    "discover",
+    "store_usd_key_secret",
+    "store_sgd_key_secret",
+    "reveal_sgd_key_once",
+}
+if OPERATION_MODE not in ALLOWED_OPERATION_MODES:
+    raise ValueError(f"operation_mode must be one of {sorted(ALLOWED_OPERATION_MODES)}")
 
 
 def resolve_client_key() -> str:
@@ -244,11 +262,30 @@ def static_validate_no_full_key_prints() -> bool:
     violations = []
     tree = ast.parse(source)
 
+    parent_by_id = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parent_by_id[id(child)] = parent
+
+    def enclosing_function_name(node: ast.AST) -> Optional[str]:
+        current = node
+        while id(current) in parent_by_id:
+            current = parent_by_id[id(current)]
+            if isinstance(current, ast.FunctionDef):
+                return current.name
+        return None
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         segment = ast.get_source_segment(source, node) or ""
         if isinstance(node.func, ast.Name) and node.func.id == "print":
+            risky_names = {
+                child.id
+                for child in ast.walk(node)
+                if isinstance(child, ast.Name)
+                and child.id in {"secret_value", "sgd_account_key_private_handoff"}
+            }
             risky_calls = [
                 child.func.id
                 for child in ast.walk(node)
@@ -256,13 +293,14 @@ def static_validate_no_full_key_prints() -> bool:
                 and isinstance(child.func, ast.Name)
                 and child.func.id == "account_key"
             ]
-            if risky_calls:
-                violations.append(f"unsafe print call: {segment[:120]}")
+            if risky_names or risky_calls:
+                if enclosing_function_name(node) != "reveal_sgd_account_key_once":
+                    violations.append(f"unsafe print call: {segment[:120]}")
         if re.search(r"dbutils\.notebook\.exit\(|to_csv\(|dbutils\.fs\.put\(", segment):
             violations.append(f"unsafe write/exit call: {segment[:120]}")
     if violations:
         raise RuntimeError(f"Static validation failed for unsafe output/write patterns: {violations}")
-    print("Static validation: no full key print/write patterns detected.")
+    print("Static validation: no full key print/write patterns outside gated SGD reveal mode detected.")
     return True
 
 
@@ -288,11 +326,95 @@ def print_discovery(accounts: list[dict], target_accounts: list[tuple[str, dict]
         )
 
 
+def store_account_key_secret(account: dict, secret_key: str, confirmation: str, label: str) -> None:
+    if CONFIRM_STORE_SECRET != confirmation:
+        raise RuntimeError(f"{label} secret storage requires exact confirm_store_secret.")
+
+    secret_value = account_key(account)
+    if not secret_value:
+        raise RuntimeError(f"{label} AccountKey is missing.")
+
+    print(
+        f"{label} account secret storage precheck:",
+        "AccountId:",
+        account_id(account),
+        "Currency:",
+        account_currency(account),
+        "key_present:",
+        bool(secret_value),
+        "key_length:",
+        len(secret_value),
+        "key_sha256_12:",
+        fingerprint(secret_value),
+    )
+
+    try:
+        put_secret = dbutils.secrets.put
+    except Exception:
+        print(NO_SECRET_WRITE_MESSAGE)
+        raise RuntimeError("Databricks notebook secret write is unavailable.")
+
+    try:
+        put_secret(SECRET_SCOPE, secret_key, secret_value)
+    except Exception as exc:
+        print(NO_SECRET_WRITE_MESSAGE)
+        raise RuntimeError("Databricks notebook secret write failed.") from exc
+
+    loaded_value = dbutils.secrets.get(SECRET_SCOPE, secret_key)
+    if loaded_value != secret_value:
+        raise RuntimeError(f"Secret write verification failed for {SECRET_SCOPE}/{secret_key}.")
+    print("loaded:", bool(loaded_value), "length:", len(loaded_value), "redacted:", loaded_value[:4] + "..." + loaded_value[-4:])
+
+
+def context_tag(name: str) -> str:
+    try:
+        tags = dbutils.notebook.entry_point.getDbutils().notebook().getContext().tags()
+        value = tags.get(name)
+        if hasattr(value, "isDefined") and value.isDefined():
+            return str(value.get())
+        if value:
+            return str(value)
+    except Exception:
+        pass
+    return ""
+
+
+def running_as_job_task() -> bool:
+    return bool(context_tag("jobId") or context_tag("jobRunId") or context_tag("taskKey"))
+
+
+def reveal_sgd_account_key_once(account: dict) -> None:
+    if running_as_job_task():
+        raise RuntimeError("SGD AccountKey reveal is blocked for job task runs. Use a private interactive notebook run only.")
+    if CONFIRM_REVEAL_SECRET != REVEAL_SGD_SECRET_CONFIRMATION:
+        raise RuntimeError("SGD AccountKey reveal requires exact confirm_reveal_secret.")
+
+    sgd_account_key_private_handoff = account_key(account)
+    if not sgd_account_key_private_handoff:
+        raise RuntimeError("SGD AccountKey is missing.")
+
+    print("PRIVATE INTERACTIVE RUN ONLY. COPY INTO DATABRICKS SECRET IMMEDIATELY. CLEAR OUTPUT AFTER USE.")
+    print(sgd_account_key_private_handoff)
+    print("databricks secrets put-secret saxo sgd_account_key --profile pawan-quant")
+    print("After storing the secret, clear notebook output.")
+    print("Revert/remove reveal_sgd_key_once mode before final commit if possible.")
+
+
 def run():
     static_validate_no_full_key_prints()
     accounts = fetch_accounts()
     usd_account = find_account(accounts, USD_ACCOUNT_ID, USD_CURRENCY)
     sgd_account = find_account(accounts, SGD_ACCOUNT_ID, SGD_CURRENCY)
+
+    if OPERATION_MODE == "store_usd_key_secret":
+        store_account_key_secret(usd_account, USD_SECRET_KEY, STORE_USD_SECRET_CONFIRMATION, "USD")
+        return
+    if OPERATION_MODE == "store_sgd_key_secret":
+        store_account_key_secret(sgd_account, SGD_SECRET_KEY, STORE_SGD_SECRET_CONFIRMATION, "SGD")
+        return
+    if OPERATION_MODE == "reveal_sgd_key_once":
+        reveal_sgd_account_key_once(sgd_account)
+        return
 
     print_discovery(accounts, [("USD", usd_account), ("SGD", sgd_account)])
 

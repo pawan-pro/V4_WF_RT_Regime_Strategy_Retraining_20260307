@@ -34,6 +34,10 @@ Read this before changing Databricks jobs, Saxo auth, or realtime pipelines in t
 
 - Use existing cluster `0311-005159-pm2x3pce` for the live/downstream jobs.
 - Do not switch the downstream Alpaca job back to a new job cluster unless cluster-create permissions are confirmed.
+- Dashboard/report interactive compute for Avik and Pawan: `v4-dashboard-shared-compute` (`0505-040158-nnjdzqxa`), shared/Unity-Catalog-compatible access mode, dashboard/report notebooks only.
+- Avik (`avik@mubama.group`) has `CAN_RESTART` on `v4-dashboard-shared-compute`, which permits attach/run/start/restart; Pawan (`pawan.jatale@mubama.group`) has `CAN_MANAGE`.
+- Do not attach `v4-dashboard-shared-compute` to Saxo live execution, token refresh, model inference, monthly retraining, or RT feature/signal generation jobs.
+- Do not repurpose or modify production cluster `0311-005159-pm2x3pce` to support Avik dashboard interactivity.
 
 ## Execution Guard
 

@@ -34,6 +34,7 @@ from pyspark.sql.types import (
 # ---------------------------------------------------------------------------
 CATALOG = "pawan_quant_research_1"
 SCHEMA = "v4"
+USD_PRODUCTION_CUTOVER_DATE = "2026-05-27"
 
 BROKER_HISTORY_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_saxo_broker_trade_history"
 INTERNAL_TRADE_LOG = f"{CATALOG}.{SCHEMA}.bronze_rt_saxo_trade_log"

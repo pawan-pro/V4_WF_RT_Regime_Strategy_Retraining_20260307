@@ -477,9 +477,15 @@ def find_configured_account(headers):
 
 
 def enforce_live_account_guard(account_info, balance_payload):
-    balance_currency = balance_payload.get("Currency") if isinstance(balance_payload, dict) else None
     if EXECUTION_MODE != "live":
         return
+    if (
+        SAXO_ACCOUNT_KEY_SECRET_SCOPE != DEFAULT_ACCOUNT_KEY_SECRET_SCOPE
+        or SAXO_ACCOUNT_KEY_SECRET_KEY != DEFAULT_ACCOUNT_KEY_SECRET_KEY
+    ):
+        raise RuntimeError(
+            "Live Saxo execution blocked: live mode must use saxo/usd_account_key."
+        )
     if account_info["account_id"] != EXPECTED_LIVE_ACCOUNT_ID:
         raise RuntimeError(
             f"Live Saxo execution blocked: configured account_id={account_info['account_id']} "
@@ -488,10 +494,6 @@ def enforce_live_account_guard(account_info, balance_payload):
     if account_info["currency"].upper() != EXPECTED_LIVE_CURRENCY:
         raise RuntimeError(
             "Live Saxo execution blocked: configured account currency is not USD."
-        )
-    if balance_currency is not None and str(balance_currency).upper() != EXPECTED_LIVE_CURRENCY:
-        raise RuntimeError(
-            "Live Saxo execution blocked: balance payload currency is not USD."
         )
 
 
@@ -1014,8 +1016,8 @@ if EXECUTION_MODE == "shadow":
             "action": "shadow",
             "message": "No execution performed",
             "account_id": account_info["account_id"],
-            "account_currency": account_info["currency"],
-            "balance_currency": pre_balance.get("account_currency"),
+            "account_metadata_currency": account_info["currency"],
+            "balance_payload_currency": pre_balance.get("account_currency"),
             "account_key_redacted": redact_account_key(ACCOUNT_KEY),
             "positions_count": len(pre_active_positions),
             "open_symbol_orders": len(pre_open_symbol_orders),
@@ -1358,7 +1360,7 @@ append_dataframe_with_retry(
 print(f"Saxo trade log written to {TARGET_TABLE}")
 print(f"Execution mode: {EXECUTION_MODE}")
 print(f"Saxo account id: {account_info['account_id']}")
-print(f"Saxo account currency: {account_info['currency']}")
+print(f"Saxo account metadata currency: {account_info['currency']}")
 print(f"Saxo balance payload currency: {post_balance.get('account_currency')}")
 print(f"Saxo account key redacted: {redact_account_key(ACCOUNT_KEY)}")
 print(f"Saxo client key redacted: {redact_secret(CLIENT_KEY)}")

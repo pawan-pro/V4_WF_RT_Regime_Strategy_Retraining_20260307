@@ -30,6 +30,7 @@ env/
 *.delta
 data/
 outputs/
+.symphony/
 
 # Secrets and configs
 *.pem
@@ -40,3 +41,5 @@ secrets/
 # OS
 .DS_Store
 Thumbs.db
+
+.databricks
