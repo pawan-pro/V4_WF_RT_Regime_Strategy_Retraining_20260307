@@ -10,7 +10,9 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import re
+import time
 import finnhub
+import requests
 from pyspark.sql import functions as F
 
 CATALOG = "pawan_quant_research_1"
@@ -18,6 +20,9 @@ SCHEMA = "v4"
 TARGET_TABLE = f"{CATALOG}.{SCHEMA}.bronze_rt_macro_events_live"
 
 FINNHUB_API_KEY = "d5s3pchr01qoo9r2f3h0d5s3pchr01qoo9r2f3hg"
+FINNHUB_MAX_ATTEMPTS = 3
+FINNHUB_TIMEOUT_SECONDS = 25
+FINNHUB_RETRY_BASE_SECONDS = 2.0
 
 TARGET_INDICATORS = {"CPIAUCSL", "UMCSENT", "PCEPI", "PCE", "GDPC1"}
 TARGET_EVENT_ALIASES = {
@@ -70,6 +75,17 @@ CONFIDENCE_PRIORITY = {
     "scheduled": 0,
     None: -1,
 }
+
+
+def widget_text(name, default):
+    try:
+        dbutils.widgets.text(name, default)
+        return (dbutils.widgets.get(name) or default).strip()
+    except Exception:
+        return default
+
+
+SIMULATE_FINNHUB_TIMEOUT = widget_text("simulate_finnhub_timeout", "false").lower() == "true"
 
 
 def normalize_text(value):
@@ -220,6 +236,153 @@ def build_rows_from_calendar(payload):
     return frame.drop(columns=["status_priority", "confidence_priority"]).to_dict(orient="records")
 
 
+def exception_status_code(exc):
+    status_code = getattr(exc, "status_code", None)
+    if status_code is not None:
+        return status_code
+    response = getattr(exc, "response", None)
+    if response is not None:
+        return getattr(response, "status_code", None)
+    return None
+
+
+def is_transient_finnhub_error(exc):
+    if isinstance(
+        exc,
+        (
+            requests.exceptions.Timeout,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.ConnectTimeout,
+            requests.exceptions.ConnectionError,
+        ),
+    ):
+        return True
+
+    status_code = exception_status_code(exc)
+    if status_code in {408, 425, 429, 500, 502, 503, 504}:
+        return True
+
+    message = str(exc).lower()
+    transient_markers = (
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "connection aborted",
+        "connection reset",
+        "rate limit",
+        "too many requests",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+    )
+    return any(marker in message for marker in transient_markers)
+
+
+def hard_failure_reason(exc):
+    status_code = exception_status_code(exc)
+    if status_code in {401, 403}:
+        return "authentication/configuration corruption"
+    return None
+
+
+def validate_finnhub_payload(payload):
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            f"Malformed critical Finnhub payload: expected dict, got {type(payload).__name__}"
+        )
+
+    records = payload.get("economicCalendar", [])
+    if records is None:
+        payload["economicCalendar"] = []
+        return payload
+
+    if not isinstance(records, list):
+        raise RuntimeError("Malformed critical Finnhub payload: economicCalendar is not a list")
+
+    for idx, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise RuntimeError(
+                f"Malformed critical Finnhub payload: economicCalendar[{idx}] is not an object"
+            )
+
+    return payload
+
+
+def recent_persisted_state_count():
+    try:
+        row = spark.sql(
+            f"""
+            SELECT COUNT(*) AS row_count
+            FROM {TARGET_TABLE}
+            WHERE indicator_id IN ('CPIAUCSL', 'UMCSENT', 'PCEPI', 'PCE', 'GDPC1')
+              AND scheduled_release_ts >= current_timestamp() - INTERVAL 45 DAYS
+            """
+        ).collect()[0]
+        return int(row["row_count"])
+    except Exception:
+        return None
+
+
+def exit_success(fetch_status, degraded_mode, message, extra=None):
+    payload = {
+        "fetch_status": fetch_status,
+        "degraded_mode": degraded_mode,
+        "message": message,
+        "target_table": TARGET_TABLE,
+        "persisted_recent_macro_rows": recent_persisted_state_count(),
+        "ingestion_ts_utc": datetime.now(ZoneInfo("UTC")).isoformat(),
+    }
+    if extra:
+        payload.update(extra)
+    print(
+        "Finnhub macro fetch summary:",
+        {
+            "fetch_status": payload["fetch_status"],
+            "degraded_mode": payload["degraded_mode"],
+            "message": payload["message"],
+            "persisted_recent_macro_rows": payload["persisted_recent_macro_rows"],
+        },
+    )
+    dbutils.notebook.exit(str(payload))
+
+
+def fetch_finnhub_calendar_with_retry(client, window_start, window_end):
+    last_exc = None
+    for attempt in range(1, FINNHUB_MAX_ATTEMPTS + 1):
+        try:
+            if SIMULATE_FINNHUB_TIMEOUT:
+                raise requests.exceptions.ReadTimeout(
+                    f"Simulated Finnhub read timeout after {FINNHUB_TIMEOUT_SECONDS}s"
+                )
+            payload = client.calendar_economic(
+                _from=str(window_start),
+                to=str(window_end),
+            )
+            return validate_finnhub_payload(payload), attempt
+        except Exception as exc:
+            hard_reason = hard_failure_reason(exc)
+            if hard_reason:
+                raise RuntimeError(f"Finnhub hard failure: {hard_reason}: {exc}") from exc
+            if not is_transient_finnhub_error(exc):
+                raise
+
+            last_exc = exc
+            print(
+                "Finnhub macro fetch warning:",
+                {
+                    "fetch_status": "retrying_transient_error",
+                    "attempt": attempt,
+                    "max_attempts": FINNHUB_MAX_ATTEMPTS,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:500],
+                },
+            )
+            if attempt < FINNHUB_MAX_ATTEMPTS:
+                time.sleep(FINNHUB_RETRY_BASE_SECONDS * (2 ** (attempt - 1)))
+
+    raise last_exc
+
+
 def ensure_live_macro_columns():
     existing_columns = {
         row["col_name"]
@@ -263,17 +426,44 @@ spark.sql(
 ensure_live_macro_columns()
 
 client = finnhub.Client(api_key=FINNHUB_API_KEY)
+client.DEFAULT_TIMEOUT = FINNHUB_TIMEOUT_SECONDS
 
 window_start = datetime.now(ZoneInfo("America/New_York")).date()
 window_end = window_start + timedelta(days=1)
 
 print(f"Fetching Finnhub US macro events from {window_start} to {window_end}")
-res = client.calendar_economic(_from=str(window_start), to=str(window_end))
+try:
+    res, fetch_attempts = fetch_finnhub_calendar_with_retry(client, window_start, window_end)
+except Exception as exc:
+    if is_transient_finnhub_error(exc):
+        exit_success(
+            fetch_status="degraded_transient_finnhub_error",
+            degraded_mode=True,
+            message="Finnhub economic calendar unavailable; preserving existing persisted macro state.",
+            extra={
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:500],
+                "attempts": FINNHUB_MAX_ATTEMPTS,
+                "window_start": str(window_start),
+                "window_end": str(window_end),
+            },
+        )
+    raise
+
 rows = build_rows_from_calendar(res)
 
 if not rows:
     print("No target macro calendar rows found for live window")
-    dbutils.notebook.exit("NO_NEW_CORE_MACRO_EVENTS")
+    exit_success(
+        fetch_status="success_no_target_events",
+        degraded_mode=False,
+        message="No target macro calendar rows found for live window.",
+        extra={
+            "attempts": fetch_attempts,
+            "window_start": str(window_start),
+            "window_end": str(window_end),
+        },
+    )
 
 macro_df = pd.DataFrame(rows)
 macro_df = macro_df.sort_values(["indicator_id", "scheduled_release_ts", "status"])
@@ -329,3 +519,12 @@ latest_schedule = spark.sql(
 ).show(truncate=False)
 
 print("Live macro events written:", len(rows))
+print(
+    "Finnhub macro fetch summary:",
+    {
+        "fetch_status": "success",
+        "degraded_mode": False,
+        "rows_written": len(rows),
+        "attempts": fetch_attempts,
+    },
+)

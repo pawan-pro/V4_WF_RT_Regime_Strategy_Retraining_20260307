@@ -1,19 +1,31 @@
 {
-  "name": "v4_saxo_token_refresher",
   "description": "Standalone Saxo token refresher for V4 cutover",
-  "schedule": {
-    "quartz_cron_expression": "0 0/10 * ? * *",
-    "timezone_id": "America/New_York",
-    "pause_status": "UNPAUSED"
-  },
+  "email_notifications": {},
+  "format": "MULTI_TASK",
   "max_concurrent_runs": 1,
+  "name": "v4_saxo_token_refresher",
+  "queue": {
+    "enabled": true
+  },
+  "schedule": {
+    "pause_status": "UNPAUSED",
+    "quartz_cron_expression": "0 0/10 * ? * *",
+    "timezone_id": "America/New_York"
+  },
   "tasks": [
     {
-      "task_key": "saxo_token_refresh",
+      "disabled": false,
+      "email_notifications": {},
       "existing_cluster_id": "0311-005159-pm2x3pce",
       "notebook_task": {
-        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/05_Utilities/09_RT_Saxo_Token_Refresher_Standalone_Job"
-      }
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/05_Utilities/09_RT_Saxo_Token_Refresher_Standalone_Job",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "saxo_token_refresh",
+      "timeout_seconds": 0
     }
-  ]
+  ],
+  "timeout_seconds": 0,
+  "webhook_notifications": {}
 }

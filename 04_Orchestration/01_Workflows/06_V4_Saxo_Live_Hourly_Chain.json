@@ -1,124 +1,219 @@
 {
-  "name": "v4_saxo_live_hourly_chain",
   "description": "Primary hourly Saxo execution and feature chain for V4 after cutover",
-  "schedule": {
-    "quartz_cron_expression": "0 1 * ? * *",
-    "timezone_id": "America/New_York",
-    "pause_status": "UNPAUSED"
-  },
+  "email_notifications": {},
+  "format": "MULTI_TASK",
   "max_concurrent_runs": 1,
+  "name": "v4_saxo_live_hourly_chain",
+  "queue": {
+    "enabled": true
+  },
+  "schedule": {
+    "pause_status": "UNPAUSED",
+    "quartz_cron_expression": "0 1 * ? * *",
+    "timezone_id": "America/New_York"
+  },
   "tasks": [
     {
+      "disabled": false,
+      "email_notifications": {},
+      "existing_cluster_id": "0311-005159-pm2x3pce",
+      "libraries": [
+        {
+          "pypi": {
+            "package": "alpaca-py==0.43.2"
+          }
+        },
+        {
+          "pypi": {
+            "package": "nest_asyncio==1.6.0"
+          }
+        }
+      ],
+      "max_retries": 2,
+      "min_retry_interval_millis": 120000,
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/01_RT_Live_Market_Ingestion",
+        "source": "WORKSPACE"
+      },
+      "retry_on_timeout": true,
+      "run_if": "ALL_SUCCESS",
       "task_key": "rt_01_market",
-      "existing_cluster_id": "0311-005159-pm2x3pce",
-      "max_retries": 2,
-      "min_retry_interval_millis": 120000,
-      "retry_on_timeout": true,
-      "libraries": [
-        {"pypi": {"package": "alpaca-py==0.43.2"}},
-        {"pypi": {"package": "nest_asyncio==1.6.0"}}
-      ],
-      "notebook_task": {
-        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/01_RT_Live_Market_Ingestion"
-      }
+      "timeout_seconds": 0
     },
     {
-      "task_key": "rt_02_vix",
-      "depends_on": [{"task_key": "rt_01_market"}],
-      "existing_cluster_id": "0311-005159-pm2x3pce",
-      "max_retries": 2,
-      "min_retry_interval_millis": 120000,
-      "retry_on_timeout": true,
-      "libraries": [
-        {"pypi": {"package": "fredapi==0.5.2"}}
-      ],
-      "notebook_task": {
-        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/02_RT_Live_Rates_VIX_Ingestion"
-      }
-    },
-    {
-      "task_key": "rt_01b_macro_events",
-      "depends_on": [{"task_key": "rt_01_market"}],
-      "existing_cluster_id": "0311-005159-pm2x3pce",
-      "max_retries": 2,
-      "min_retry_interval_millis": 120000,
-      "retry_on_timeout": true,
-      "libraries": [
-        {"pypi": {"package": "finnhub-python==2.4.25"}}
-      ],
-      "notebook_task": {
-        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/02_RT_Live_Macro_Events"
-      }
-    },
-    {
-      "task_key": "rt_03_silver",
       "depends_on": [
-        {"task_key": "rt_01b_macro_events"},
-        {"task_key": "rt_02_vix"}
+        {
+          "task_key": "rt_01_market"
+        }
       ],
+      "disabled": false,
+      "email_notifications": {},
       "existing_cluster_id": "0311-005159-pm2x3pce",
-      "max_retries": 2,
-      "min_retry_interval_millis": 120000,
-      "retry_on_timeout": true,
-      "notebook_task": {
-        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/03_RT_Silver_RT_Enrichment"
-      }
-    },
-    {
-      "task_key": "rt_04_inference",
-      "depends_on": [{"task_key": "rt_03_silver"}],
-      "existing_cluster_id": "0311-005159-pm2x3pce",
-      "max_retries": 2,
-      "min_retry_interval_millis": 120000,
-      "retry_on_timeout": true,
       "libraries": [
-        {"pypi": {"package": "xgboost==3.1.1"}}
+        {
+          "pypi": {
+            "package": "fredapi==0.5.2"
+          }
+        }
       ],
+      "max_retries": 2,
+      "min_retry_interval_millis": 120000,
       "notebook_task": {
-        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/04_RT_Model_Inference_Engine"
-      }
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/02_RT_Live_Rates_VIX_Ingestion",
+        "source": "WORKSPACE"
+      },
+      "retry_on_timeout": true,
+      "run_if": "ALL_SUCCESS",
+      "task_key": "rt_02_vix",
+      "timeout_seconds": 0
     },
     {
-      "task_key": "rt_08_saxo_execution",
-      "depends_on": [{"task_key": "rt_04_inference"}],
+      "depends_on": [
+        {
+          "task_key": "rt_01_market"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "existing_cluster_id": "0311-005159-pm2x3pce",
+      "libraries": [
+        {
+          "pypi": {
+            "package": "finnhub-python==2.4.25"
+          }
+        }
+      ],
+      "max_retries": 2,
+      "min_retry_interval_millis": 120000,
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/02_RT_Live_Macro_Events",
+        "source": "WORKSPACE"
+      },
+      "retry_on_timeout": true,
+      "run_if": "ALL_SUCCESS",
+      "task_key": "rt_01b_macro_events",
+      "timeout_seconds": 0
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "rt_01b_macro_events"
+        },
+        {
+          "task_key": "rt_02_vix"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
       "existing_cluster_id": "0311-005159-pm2x3pce",
       "max_retries": 2,
       "min_retry_interval_millis": 120000,
-      "retry_on_timeout": true,
       "notebook_task": {
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/03_RT_Silver_RT_Enrichment",
+        "source": "WORKSPACE"
+      },
+      "retry_on_timeout": true,
+      "run_if": "ALL_SUCCESS",
+      "task_key": "rt_03_silver",
+      "timeout_seconds": 0
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "rt_03_silver"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "existing_cluster_id": "0311-005159-pm2x3pce",
+      "libraries": [
+        {
+          "pypi": {
+            "package": "xgboost==3.1.1"
+          }
+        }
+      ],
+      "max_retries": 2,
+      "min_retry_interval_millis": 120000,
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/04_RT_Model_Inference_Engine",
+        "source": "WORKSPACE"
+      },
+      "retry_on_timeout": true,
+      "run_if": "ALL_SUCCESS",
+      "task_key": "rt_04_inference",
+      "timeout_seconds": 0
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "rt_04_inference"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "existing_cluster_id": "0311-005159-pm2x3pce",
+      "max_retries": 2,
+      "min_retry_interval_millis": 120000,
+      "notebook_task": {
+        "base_parameters": {
+          "execution_mode": "live"
+        },
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/08_RT_Saxo_Trade_Execution",
-        "base_parameters": {
-          "execution_mode": "live"
-        }
-      }
+        "source": "WORKSPACE"
+      },
+      "retry_on_timeout": true,
+      "run_if": "ALL_SUCCESS",
+      "task_key": "rt_08_saxo_execution",
+      "timeout_seconds": 0
     },
     {
-      "task_key": "rt_09_saxo_audit",
-      "depends_on": [{"task_key": "rt_08_saxo_execution"}],
+      "depends_on": [
+        {
+          "task_key": "rt_08_saxo_execution"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
       "existing_cluster_id": "0311-005159-pm2x3pce",
       "max_retries": 2,
       "min_retry_interval_millis": 120000,
-      "retry_on_timeout": true,
       "notebook_task": {
+        "base_parameters": {
+          "execution_mode": "live"
+        },
         "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/09_RT_Saxo_Signal_Audit_Log",
-        "base_parameters": {
-          "execution_mode": "live"
-        }
-      }
+        "source": "WORKSPACE"
+      },
+      "retry_on_timeout": true,
+      "run_if": "ALL_SUCCESS",
+      "task_key": "rt_09_saxo_audit",
+      "timeout_seconds": 0
     },
     {
-      "task_key": "rt_10_saxo_dashboard",
-      "depends_on": [{"task_key": "rt_09_saxo_audit"}],
+      "depends_on": [
+        {
+          "task_key": "rt_09_saxo_audit"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
       "existing_cluster_id": "0311-005159-pm2x3pce",
       "max_retries": 2,
       "min_retry_interval_millis": 120000,
-      "retry_on_timeout": true,
       "notebook_task": {
-        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/10_RT_Saxo_Dashboard_Feed",
         "base_parameters": {
           "execution_mode": "live"
-        }
-      }
+        },
+        "notebook_path": "/Workspace/Users/pawan.jatale@mubama.group/V4_WF_RT_Regime_Strategy_Retraining_github/01_Processing/03_Realtime/10_RT_Saxo_Dashboard_Feed",
+        "source": "WORKSPACE"
+      },
+      "retry_on_timeout": true,
+      "run_if": "ALL_SUCCESS",
+      "task_key": "rt_10_saxo_dashboard",
+      "timeout_seconds": 0
     }
-  ]
+  ],
+  "timeout_seconds": 0,
+  "webhook_notifications": {}
 }
